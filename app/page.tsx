@@ -97,7 +97,6 @@ function yyyymm(d: Date) {
 }
 
 function monthKeyFromISO(ts: string) {
-  // ts is ISO string (e.g. 2026-02-02T...)
   return String(ts).slice(0, 7);
 }
 
@@ -219,7 +218,6 @@ function Metric({
   tone?: "neutral" | "good" | "bad";
 }) {
   const toneColor = tone === "good" ? THEME.good : tone === "bad" ? THEME.bad : THEME.text;
-
   const dotColor = tone === "good" ? THEME.good : tone === "bad" ? THEME.bad : THEME.gold;
 
   return (
@@ -244,7 +242,6 @@ function Metric({
         {value}
       </div>
 
-      {/* ✅ 支援兩行（sub 裡面用 \n 換行） */}
       {sub ? (
         <div className="mt-1 text-xs whitespace-pre-line" style={{ color: THEME.muted }}>
           {sub}
@@ -351,8 +348,19 @@ export default function Page() {
     try {
       setPrincipalErr(null);
       const r = await fetch("/api/public/principal", { cache: "no-store" });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "Failed to fetch principal");
+
+      // ✅ 穩定版：先讀 text 再 parse
+      const text = await r.text();
+      let j: any = null;
+      try {
+        j = text ? JSON.parse(text) : null;
+      } catch {
+        j = null;
+      }
+
+      if (!r.ok) {
+        throw new Error(j?.error || `HTTP ${r.status}: ${text?.slice(0, 200) || "empty response"}`);
+      }
 
       const rows = (j?.rows ?? j?.data?.rows ?? j?.data ?? []) as PrincipalRow[];
       setPrincipalRows(Array.isArray(rows) ? rows : []);
@@ -366,17 +374,21 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ✅✅✅ 這裡就是你要的：addPrincipal 穩定版
   async function addPrincipal() {
     try {
       setPrincipalErr(null);
+
       const month = String(pMonth || "").slice(0, 7);
       const delta = Number(pDelta);
+
       if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("月份格式要 YYYY-MM");
       if (!Number.isFinite(delta) || delta === 0)
         throw new Error("金額不能是 0，正數=投入本金/入金，負數=提領本金/出金");
       if (!adminToken) throw new Error("請先輸入 ADMIN TOKEN（只要輸入一次，會記住）");
 
       setPrincipalSaving(true);
+
       const r = await fetch("/api/admin/principal", {
         method: "POST",
         headers: {
@@ -389,8 +401,19 @@ export default function Page() {
           note: pNote?.trim() || null,
         }),
       });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "Failed to save principal adjustment");
+
+      // ✅ 穩定版：先讀 text，再 parse
+      const text = await r.text();
+      let j: any = null;
+      try {
+        j = text ? JSON.parse(text) : null;
+      } catch {
+        j = null;
+      }
+
+      if (!r.ok) {
+        throw new Error(j?.error || `HTTP ${r.status}: ${text?.slice(0, 200) || "empty response"}`);
+      }
 
       setPDelta(0);
       setPNote("");
@@ -406,7 +429,6 @@ export default function Page() {
   const lastUpdate = data?.header?.last_update ?? null;
   const title = data?.header?.title ?? "MoneyFlow Dashboard";
   const tags = data?.header?.tags ?? ["public", "USDT"];
-
   const totalNav = data?.kpi?.total_nav ?? null;
 
   // 原本 NAV 圖的 range 邏輯（保持）
@@ -421,10 +443,6 @@ export default function Page() {
 
   /**
    * ✅ 只有損益線（P&L Only）
-   * - 先把資金流扣掉：pnl_base = nav - principal_cum(created_at<=t)
-   * - 再做每月歸零：pnl_month = pnl_base - anchor(月初第一筆pnl_base)
-   *
-   * 重要：anchor 用「全量 nav_history」算，range 只是最後顯示切片
    */
   const pnlOnlyAllSeries = useMemo(() => {
     const navAll = [...(data?.nav_history ?? [])].sort(
@@ -452,23 +470,22 @@ export default function Page() {
 
       const monthKey = monthKeyFromISO(p.timestamp);
       if (!anchorByMonth.has(monthKey)) {
-        anchorByMonth.set(monthKey, pnlBase); // 當月第一筆作為基準
+        anchorByMonth.set(monthKey, pnlBase);
       }
       const anchor = anchorByMonth.get(monthKey) ?? pnlBase;
       const pnlMonth = pnlBase - anchor;
 
       return {
         timestamp: p.timestamp,
-        pnl_month: pnlMonth, // ✅ 圖表唯一要畫的線
-        pnl_base: pnlBase, // 可用於 debug
-        principal_cum: principalCum, // 不畫，但保留
-        total_nav: nav, // 不畫，但保留
+        pnl_month: pnlMonth,
+        pnl_base: pnlBase,
+        principal_cum: principalCum,
+        total_nav: nav,
         month_key: monthKey,
       };
     });
   }, [data, principalRows]);
 
-  // ✅ 顯示用：照 range 切片（保持你要的 7D/30D/ALL）
   const pnlOnlyChartData = useMemo(() => {
     if (!pnlOnlyAllSeries.length) return [];
     if (range === "ALL") return pnlOnlyAllSeries;
@@ -479,21 +496,14 @@ export default function Page() {
   }, [pnlOnlyAllSeries, range]);
 
   const latestPnlOnly = pnlOnlyChartData[pnlOnlyChartData.length - 1];
-
-  // ✅ KPI：本月損益（跟 range 無關：你 KPI 想看「現在這個月截至目前」）
   const monthPnl = num(latestPnlOnly?.pnl_month ?? 0);
   const monthPnlPositive = monthPnl >= 0;
 
-  // ✅ 上月損益：抓「上個月最後一筆 pnl_month」
   const lastMonthPnl = useMemo(() => {
     if (!pnlOnlyAllSeries.length) return null;
-
     const pm = prevMonthKey(new Date());
-    // 找出上個月的所有點
     const rows = pnlOnlyAllSeries.filter((r: any) => r.month_key === pm);
     if (!rows.length) return null;
-
-    // rows 已經是按 timestamp 升序（因為 navAll 升序 map 出來）
     const last = rows[rows.length - 1];
     return { month: pm, value: num(last.pnl_month) };
   }, [pnlOnlyAllSeries]);
@@ -523,7 +533,6 @@ export default function Page() {
     return rows.filter((p) => {
       if (categoryFilter !== "all" && p.category !== categoryFilter) return false;
       if (chainFilter !== "all" && p.chain !== chainFilter) return false;
-
       if (!q) return true;
       const hay = `${p.asset} ${p.chain} ${p.category} ${p.source}`.toLowerCase();
       return hay.includes(q);
@@ -636,7 +645,6 @@ export default function Page() {
             <Metric label="總淨值" value={`${fmtUsd(totalNav)} 美元`} sub="USD" />
           </Card>
 
-          {/* ✅ 本月損益：加入「上月損益」同一格、分兩行 */}
           <Card accent={monthPnlPositive ? "good" : "bad"}>
             <Metric
               label="本月損益"
@@ -789,7 +797,7 @@ export default function Page() {
           </Card>
         </div>
 
-        {/* Charts row 2: PnL-only + Cloud principal input */}
+        {/* Charts row 2 */}
         <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
           <Card
             className="lg:col-span-2"
