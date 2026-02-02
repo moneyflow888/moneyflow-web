@@ -67,12 +67,6 @@ function fmtUsdCompact(v: any) {
   return n.toFixed(0);
 }
 
-function fmtPct(v: any) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  return `${n.toFixed(4)}%`;
-}
-
 function formatTime(ts: string | null) {
   if (!ts) return "—";
   const d = new Date(ts);
@@ -103,6 +97,24 @@ function monthKeyFromISO(ts: string) {
 function prevMonthKey(now = new Date()) {
   const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   return yyyymm(d);
+}
+
+/**
+ * ✅ 穩定版：先讀 text，再嘗試 JSON.parse
+ * - 避免「Unexpected end of JSON input」
+ * - 避免拿到 HTML（例如 404/500頁）就炸
+ */
+async function safeReadJson(r: Response) {
+  const text = await r.text();
+  if (!text) return { ok: r.ok, status: r.status, data: null as any, raw: "" };
+
+  try {
+    const data = JSON.parse(text);
+    return { ok: r.ok, status: r.status, data, raw: text };
+  } catch {
+    // 不是 JSON（可能是 HTML / 空白 / 純文字）
+    return { ok: r.ok, status: r.status, data: null as any, raw: text };
+  }
 }
 
 /**
@@ -242,6 +254,7 @@ function Metric({
         {value}
       </div>
 
+      {/* ✅ 支援兩行（sub 裡面用 \n 換行） */}
       {sub ? (
         <div className="mt-1 text-xs whitespace-pre-line" style={{ color: THEME.muted }}>
           {sub}
@@ -305,7 +318,7 @@ export default function Page() {
   const [principalErr, setPrincipalErr] = useState<string | null>(null);
   const [principalSaving, setPrincipalSaving] = useState(false);
 
-  // load admin token from localStorage (so you don't type every time)
+  // load admin token from localStorage
   useEffect(() => {
     try {
       const t = localStorage.getItem("moneyflow.admin_token.v1");
@@ -343,26 +356,21 @@ export default function Page() {
     };
   }, []);
 
-  // ✅ principal API: { total_principal, rows: [...] }
   async function reloadPrincipal() {
     try {
       setPrincipalErr(null);
       const r = await fetch("/api/public/principal", { cache: "no-store" });
+      const out = await safeReadJson(r);
 
-      // ✅ 穩定版：先讀 text 再 parse
-      const text = await r.text();
-      let j: any = null;
-      try {
-        j = text ? JSON.parse(text) : null;
-      } catch {
-        j = null;
+      if (!out.ok) {
+        const msg =
+          out.data?.error ||
+          `Failed to fetch principal (HTTP ${out.status})` +
+            (out.raw ? `\n${String(out.raw).slice(0, 220)}` : "");
+        throw new Error(msg);
       }
 
-      if (!r.ok) {
-        throw new Error(j?.error || `HTTP ${r.status}: ${text?.slice(0, 200) || "empty response"}`);
-      }
-
-      const rows = (j?.rows ?? j?.data?.rows ?? j?.data ?? []) as PrincipalRow[];
+      const rows = (out.data?.rows ?? out.data?.data?.rows ?? out.data?.data ?? []) as PrincipalRow[];
       setPrincipalRows(Array.isArray(rows) ? rows : []);
     } catch (e: any) {
       setPrincipalErr(e?.message || String(e));
@@ -374,7 +382,11 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ✅✅✅ 這裡就是你要的：addPrincipal 穩定版
+  /**
+   * ✅ addPrincipal() 穩定版（解你現在的錯）
+   * - 先讀 text 再 parse（避免 Unexpected end of JSON）
+   * - 如果不是 JSON，直接把 HTTP 狀態 + 前 200 字顯示出來
+   */
   async function addPrincipal() {
     try {
       setPrincipalErr(null);
@@ -384,7 +396,7 @@ export default function Page() {
 
       if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("月份格式要 YYYY-MM");
       if (!Number.isFinite(delta) || delta === 0)
-        throw new Error("金額不能是 0，正數=投入本金/入金，負數=提領本金/出金");
+        throw new Error("金額不能是 0，正數=入金，負數=出金");
       if (!adminToken) throw new Error("請先輸入 ADMIN TOKEN（只要輸入一次，會記住）");
 
       setPrincipalSaving(true);
@@ -402,23 +414,20 @@ export default function Page() {
         }),
       });
 
-      // ✅ 穩定版：先讀 text，再 parse
-      const text = await r.text();
-      let j: any = null;
-      try {
-        j = text ? JSON.parse(text) : null;
-      } catch {
-        j = null;
+      const out = await safeReadJson(r);
+
+      if (!out.ok) {
+        const msg =
+          out.data?.error ||
+          `Failed to save (HTTP ${out.status})` +
+            (out.raw ? `\n${String(out.raw).slice(0, 240)}` : "");
+        throw new Error(msg);
       }
 
-      if (!r.ok) {
-        throw new Error(j?.error || `HTTP ${r.status}: ${text?.slice(0, 200) || "empty response"}`);
-      }
-
+      // 成功
       setPDelta(0);
       setPNote("");
-
-      await reloadPrincipal(); // ✅ 新增後自動刷新
+      await reloadPrincipal();
     } catch (e: any) {
       setPrincipalErr(e?.message || String(e));
     } finally {
@@ -431,7 +440,6 @@ export default function Page() {
   const tags = data?.header?.tags ?? ["public", "USDT"];
   const totalNav = data?.kpi?.total_nav ?? null;
 
-  // 原本 NAV 圖的 range 邏輯（保持）
   const navChartData = useMemo(() => {
     const rows = data?.nav_history ?? [];
     if (rows.length === 0) return [];
@@ -441,9 +449,6 @@ export default function Page() {
     return rows.filter((r) => new Date(r.timestamp).getTime() >= cutoff);
   }, [data, range]);
 
-  /**
-   * ✅ 只有損益線（P&L Only）
-   */
   const pnlOnlyAllSeries = useMemo(() => {
     const navAll = [...(data?.nav_history ?? [])].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
@@ -496,6 +501,7 @@ export default function Page() {
   }, [pnlOnlyAllSeries, range]);
 
   const latestPnlOnly = pnlOnlyChartData[pnlOnlyChartData.length - 1];
+
   const monthPnl = num(latestPnlOnly?.pnl_month ?? 0);
   const monthPnlPositive = monthPnl >= 0;
 
@@ -954,7 +960,7 @@ export default function Page() {
               </button>
 
               {principalErr ? (
-                <div className="text-xs" style={{ color: THEME.bad }}>
+                <div className="text-xs whitespace-pre-line" style={{ color: THEME.bad }}>
                   {principalErr}
                 </div>
               ) : null}
@@ -1071,8 +1077,7 @@ export default function Page() {
                     className="border-b transition-colors"
                     style={{ borderColor: "rgba(255,255,255,0.06)" }}
                     onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLTableRowElement).style.background =
-                        "rgba(212,175,55,0.06)";
+                      (e.currentTarget as HTMLTableRowElement).style.background = "rgba(212,175,55,0.06)";
                     }}
                     onMouseLeave={(e) => {
                       (e.currentTarget as HTMLTableRowElement).style.background = "transparent";
