@@ -621,7 +621,7 @@ export default function Page() {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-start gap-3">
             <div className="mt-1">
-              <Image src="/logo.png" alt="MoneyFlow" width={90} height={90} className="rounded-xl" />
+              <Image src="/logo.png" alt="MoneyFlow" width={120} height={120} className="rounded-xl" />
             </div>
 
             <div>
