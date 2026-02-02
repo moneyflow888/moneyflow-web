@@ -254,7 +254,6 @@ function Metric({
         {value}
       </div>
 
-      {/* ✅ 支援兩行（sub 裡面用 \n 換行） */}
       {sub ? (
         <div className="mt-1 text-xs whitespace-pre-line" style={{ color: THEME.muted }}>
           {sub}
@@ -331,6 +330,7 @@ export default function Page() {
     } catch {}
   }, [adminToken]);
 
+  // overview
   useEffect(() => {
     let mounted = true;
     async function run() {
@@ -338,10 +338,18 @@ export default function Page() {
         setLoading(true);
         setErr(null);
         const r = await fetch("/api/public/overview", { cache: "no-store" });
-        const j = await r.json();
-        if (!r.ok) throw new Error(j?.error || "Failed to fetch overview");
+        const out = await safeReadJson(r);
+
+        if (!out.ok) {
+          const msg =
+            out.data?.error ||
+            `Failed to fetch overview (HTTP ${out.status})` +
+              (out.raw ? `\n${String(out.raw).slice(0, 220)}` : "");
+          throw new Error(msg);
+        }
+
         if (!mounted) return;
-        setData(j);
+        setData(out.data as OverviewResponse);
       } catch (e: any) {
         if (!mounted) return;
         setErr(e?.message || String(e));
@@ -356,6 +364,7 @@ export default function Page() {
     };
   }, []);
 
+  // ✅ principal API: { total_principal, rows: [...] }
   async function reloadPrincipal() {
     try {
       setPrincipalErr(null);
@@ -383,9 +392,9 @@ export default function Page() {
   }, []);
 
   /**
-   * ✅ addPrincipal() 穩定版（解你現在的錯）
-   * - 先讀 text 再 parse（避免 Unexpected end of JSON）
-   * - 如果不是 JSON，直接把 HTTP 狀態 + 前 200 字顯示出來
+   * ✅ addPrincipal() 穩定版（避免 Unexpected end of JSON input）
+   * - 先讀 text 再 parse
+   * - 如果不是 JSON：顯示 HTTP 狀態 + raw 前幾百字
    */
   async function addPrincipal() {
     try {
@@ -419,12 +428,11 @@ export default function Page() {
       if (!out.ok) {
         const msg =
           out.data?.error ||
-          `Failed to save (HTTP ${out.status})` +
-            (out.raw ? `\n${String(out.raw).slice(0, 240)}` : "");
+          `Failed to save principal adjustment (HTTP ${out.status})` +
+            (out.raw ? `\n${String(out.raw).slice(0, 260)}` : "");
         throw new Error(msg);
       }
 
-      // 成功
       setPDelta(0);
       setPNote("");
       await reloadPrincipal();
@@ -449,6 +457,11 @@ export default function Page() {
     return rows.filter((r) => new Date(r.timestamp).getTime() >= cutoff);
   }, [data, range]);
 
+  /**
+   * ✅ 只有損益線（P&L Only）
+   * - pnl_base = nav - principal_cum(created_at<=t)
+   * - pnl_month = pnl_base - anchor(月初第一筆pnl_base)
+   */
   const pnlOnlyAllSeries = useMemo(() => {
     const navAll = [...(data?.nav_history ?? [])].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
@@ -474,10 +487,9 @@ export default function Page() {
       const pnlBase = nav - principalCum;
 
       const monthKey = monthKeyFromISO(p.timestamp);
-      if (!anchorByMonth.has(monthKey)) {
-        anchorByMonth.set(monthKey, pnlBase);
-      }
+      if (!anchorByMonth.has(monthKey)) anchorByMonth.set(monthKey, pnlBase);
       const anchor = anchorByMonth.get(monthKey) ?? pnlBase;
+
       const pnlMonth = pnlBase - anchor;
 
       return {
@@ -501,7 +513,6 @@ export default function Page() {
   }, [pnlOnlyAllSeries, range]);
 
   const latestPnlOnly = pnlOnlyChartData[pnlOnlyChartData.length - 1];
-
   const monthPnl = num(latestPnlOnly?.pnl_month ?? 0);
   const monthPnlPositive = monthPnl >= 0;
 
@@ -539,6 +550,7 @@ export default function Page() {
     return rows.filter((p) => {
       if (categoryFilter !== "all" && p.category !== categoryFilter) return false;
       if (chainFilter !== "all" && p.chain !== chainFilter) return false;
+
       if (!q) return true;
       const hay = `${p.asset} ${p.chain} ${p.category} ${p.source}`.toLowerCase();
       return hay.includes(q);
@@ -1077,7 +1089,8 @@ export default function Page() {
                     className="border-b transition-colors"
                     style={{ borderColor: "rgba(255,255,255,0.06)" }}
                     onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLTableRowElement).style.background = "rgba(212,175,55,0.06)";
+                      (e.currentTarget as HTMLTableRowElement).style.background =
+                        "rgba(212,175,55,0.06)";
                     }}
                     onMouseLeave={(e) => {
                       (e.currentTarget as HTMLTableRowElement).style.background = "transparent";
