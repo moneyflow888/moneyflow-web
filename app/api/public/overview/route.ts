@@ -7,14 +7,10 @@ import { createClient } from "@supabase/supabase-js";
  * - Fallback to NEXT_PUBLIC_* for convenience
  */
 const SUPABASE_URL =
-  process.env.SUPABASE_URL ||
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  "";
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 
 const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  "";
+  process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 
 if (!SUPABASE_URL) {
   throw new Error(
@@ -38,9 +34,15 @@ type PositionOut = {
   chain: string;
 };
 
+function toNumOrNull(v: any): number | null {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export async function GET() {
   try {
-    // 1) latest nav
+    // 1) latest nav (this timestamp is the "snapshot id")
     const { data: navRows, error: navErr } = await supabase
       .from("nav_snapshots")
       .select("timestamp,total_nav,change_24h,change_24h_pct")
@@ -48,7 +50,7 @@ export async function GET() {
       .limit(1);
 
     if (navErr) throw navErr;
-    const nav = navRows?.[0];
+    const nav = navRows?.[0] ?? null;
 
     // 2) nav history (for line chart)
     const { data: navHistory, error: histErr } = await supabase
@@ -59,24 +61,17 @@ export async function GET() {
 
     if (histErr) throw histErr;
 
-    // 3) latest positions timestamp
-    const { data: latestPos, error: latestPosErr } = await supabase
-      .from("position_snapshots")
-      .select("timestamp")
-      .order("timestamp", { ascending: false })
-      .limit(1);
-
-    if (latestPosErr) throw latestPosErr;
-    const latestTs = latestPos?.[0]?.timestamp ?? null;
+    // ✅ IMPORTANT: positions must be fetched by SAME timestamp as nav
+    const snapshotTs: string | null = nav?.timestamp ?? null;
 
     let positions: PositionOut[] = [];
 
-    if (latestTs) {
-      // 4) fetch positions exactly at latest timestamp (DB-side equality)
+    if (snapshotTs) {
+      // 3) fetch positions exactly at nav timestamp
       const { data: posRows, error: posErr } = await supabase
         .from("position_snapshots")
-        .select("category,source,asset_symbol,amount,value_usdt,chain")
-        .eq("timestamp", latestTs)
+        .select("category,source,asset_symbol,amount,value_usdt,chain,timestamp")
+        .eq("timestamp", snapshotTs)
         .order("value_usdt", { ascending: false });
 
       if (posErr) throw posErr;
@@ -85,14 +80,16 @@ export async function GET() {
         category: String(p.category ?? ""),
         source: String(p.source ?? ""),
         asset: String(p.asset_symbol ?? ""),
-        amount: p.amount === null || p.amount === undefined ? null : Number(p.amount),
-        value_usdt:
-          p.value_usdt === null || p.value_usdt === undefined ? null : Number(p.value_usdt),
+        amount: toNumOrNull(p.amount),
+        value_usdt: toNumOrNull(p.value_usdt),
         chain: String(p.chain ?? ""),
       }));
+    } else {
+      // 如果目前還沒有 nav（極早期狀態），就回傳空 positions（避免亂抓另一批）
+      positions = [];
     }
 
-    // 5) allocation by category
+    // 4) allocation by category
     const allocMap = new Map<string, number>();
     for (const p of positions) {
       const v = Number(p.value_usdt ?? 0);
@@ -105,7 +102,7 @@ export async function GET() {
       value_usdt,
     }));
 
-    // 6) distribution by chain
+    // 5) distribution by chain
     const chainMap = new Map<string, number>();
     for (const p of positions) {
       const v = Number(p.value_usdt ?? 0);
@@ -117,10 +114,10 @@ export async function GET() {
       value_usdt,
     }));
 
-    // 7) If nav is missing, still return a valid shape
+    // 6) If nav is missing, still return a valid shape
     if (!nav) {
       return NextResponse.json({
-        header: { title: "MoneyFlow Dashboard", last_update: latestTs, tags: ["public", "USDT"] },
+        header: { title: "MoneyFlow Dashboard", last_update: null, tags: ["public", "USDT"] },
         kpi: { total_nav: 0, change_24h: 0, change_24h_pct: 0, diff_mode: "none" },
         allocation,
         nav_history: (navHistory ?? []).map((r: any) => ({
@@ -132,11 +129,12 @@ export async function GET() {
       });
     }
 
-    // 8) Normal response
+    // 7) Normal response
     return NextResponse.json({
       header: {
         title: "MoneyFlow Dashboard",
-        last_update: nav.timestamp,
+        // ✅ last_update should match the snapshotTs
+        last_update: snapshotTs,
         tags: ["public", "USDT"],
       },
       kpi: {
@@ -154,9 +152,6 @@ export async function GET() {
       positions,
     });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }
 }
