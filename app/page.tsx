@@ -2,123 +2,11 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  PieChart,
-  Pie,
-  Legend,
-  Cell,
-  CartesianGrid,
-} from "recharts";
-
-type OverviewResponse = {
-  header: { title: string; last_update: string | null; tags?: string[] };
-  kpi: {
-    total_nav: number | string | null;
-    change_24h: number | string | null;
-    change_24h_pct: number | string | null;
-    diff_mode?: string | null;
-  };
-  allocation: { category: string; label: string; value_usdt: number }[];
-  nav_history: { timestamp: string; total_nav: number }[];
-  distribution: { chain: string; value_usdt: number }[];
-  positions: {
-    category: string;
-    source: string;
-    asset: string;
-    amount: number | string | null;
-    value_usdt: number | string | null;
-    chain: string;
-  }[];
-};
-
-type PrincipalRow = {
-  id: number;
-  month: string; // YYYY-MM
-  delta: number | string;
-  note: string | null;
-  created_at: string;
-};
-
-function clsx(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
-function num(v: any): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function fmtUsd(v: any) {
-  const n = num(v);
-  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-}
-
-function fmtUsdCompact(v: any) {
-  const n = num(v);
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 10_000) return `${(n / 10_000).toFixed(2)}萬`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
-  return n.toFixed(0);
-}
-
-function formatTime(ts: string | null) {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString();
-}
-
-function shortDate(ts: string) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mi = String(d.getMinutes()).padStart(2, "0");
-  return `${mm}/${dd} ${hh}:${mi}`;
-}
-
-function yyyymm(d: Date) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
-function monthKeyFromISO(ts: string) {
-  return String(ts).slice(0, 7);
-}
-
-function prevMonthKey(now = new Date()) {
-  const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  return yyyymm(d);
-}
+import Link from "next/link";
+import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 /**
- * ✅ 穩定版：先讀 text，再嘗試 JSON.parse
- * - 避免「Unexpected end of JSON input」
- * - 避免拿到 HTML（例如 404/500頁）就炸
- */
-async function safeReadJson(r: Response) {
-  const text = await r.text();
-  if (!text) return { ok: r.ok, status: r.status, data: null as any, raw: "" };
-
-  try {
-    const data = JSON.parse(text);
-    return { ok: r.ok, status: r.status, data, raw: text };
-  } catch {
-    // 不是 JSON（可能是 HTML / 空白 / 純文字）
-    return { ok: r.ok, status: r.status, data: null as any, raw: text };
-  }
-}
-
-/**
- * (GOLD) 金融金色主題
+ * (GOLD) 金融金色主題（跟首頁一致）
  */
 const THEME = {
   bg: "#07090D",
@@ -139,7 +27,25 @@ const THEME = {
   bad: "#ef4444",
 };
 
-const PIE_PALETTE = [THEME.gold, THEME.navy2, "#94a3b8", "#f59e0b", "#38bdf8"];
+function clsx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function num(v: any) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function fmt(v: any) {
+  return num(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function formatTime(ts: string | null) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
 
 function Card({
   title,
@@ -211,9 +117,7 @@ function Card({
         </div>
       )}
 
-      <div className={clsx(title || subtitle || right ? "px-6 pb-6 pt-4" : "p-6")}>
-        {children}
-      </div>
+      <div className={clsx(title || subtitle || right ? "px-6 pb-6 pt-4" : "p-6")}>{children}</div>
     </div>
   );
 }
@@ -263,336 +167,290 @@ function Metric({
   );
 }
 
-function LineTooltip({ active, payload, label }: any) {
-  if (!active || !payload?.length) return null;
-  const v = payload?.[0]?.value;
-  return (
-    <div
-      className="rounded-xl border px-3 py-2 text-xs shadow-[0_12px_44px_rgba(0,0,0,0.70)] backdrop-blur"
-      style={{
-        borderColor: "rgba(226,198,128,0.18)",
-        background: "rgba(5,7,10,0.82)",
-        color: THEME.text,
-      }}
-    >
-      <div style={{ color: THEME.muted }}>{formatTime(label)}</div>
-      <div className="mt-1 font-semibold" style={{ color: THEME.gold2 }}>
-        ${fmtUsd(v)}
-      </div>
-    </div>
-  );
+/**
+ * Types
+ */
+type InvestorAccount = {
+  user_id: string;
+  principal: number | null;
+  shares: number | null;
+  pending_withdraw: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type InvestorProfile = {
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  created_at: string;
+};
+
+type WithdrawRequest = {
+  id: number;
+  user_id: string;
+  amount: number | null;
+  status: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  executed_at?: string | null;
+  executed_nav?: number | null;
+  share_price?: number | null;
+  shares_to_redeem?: number | null;
+};
+
+function badgeStyle(status: string) {
+  const s = (status || "").toUpperCase();
+  const isPending = s === "PENDING";
+  const isUnpaid = s === "UNPAID";
+  const isPaid = s === "PAID";
+  const isCancelled = s === "CANCELLED" || s === "CANCELED";
+
+  const border = isPending
+    ? "rgba(242,210,125,0.35)"
+    : isUnpaid
+    ? "rgba(96,165,250,0.35)"
+    : isPaid
+    ? "rgba(34,197,94,0.35)"
+    : isCancelled
+    ? "rgba(239,68,68,0.35)"
+    : "rgba(148,163,184,0.25)";
+
+  const bg = isPending
+    ? "rgba(212,175,55,0.10)"
+    : isUnpaid
+    ? "rgba(29,78,216,0.10)"
+    : isPaid
+    ? "rgba(34,197,94,0.10)"
+    : isCancelled
+    ? "rgba(239,68,68,0.10)"
+    : "rgba(255,255,255,0.06)";
+
+  const color = isPending
+    ? THEME.gold2
+    : isUnpaid
+    ? "rgba(147,197,253,0.95)"
+    : isPaid
+    ? "rgba(134,239,172,0.95)"
+    : isCancelled
+    ? "rgba(252,165,165,0.95)"
+    : THEME.muted;
+
+  return { border, bg, color };
 }
 
-function DoughnutCenter({ total }: { total: number }) {
-  return (
-    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-      <div className="text-center">
-        <div className="text-[11px]" style={{ color: THEME.muted }}>
-          總資產
-        </div>
-        <div className="mt-1 text-lg font-semibold" style={{ color: THEME.gold2 }}>
-          {fmtUsdCompact(total)} 美元
-        </div>
-      </div>
-    </div>
-  );
-}
+export default function InvestorsPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
-export default function Page() {
-  const [data, setData] = useState<OverviewResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loadingAuth, setLoadingAuth] = useState(false);
+  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const [range, setRange] = useState<"7D" | "30D" | "ALL">("7D");
-  const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
-  const [chainFilter, setChainFilter] = useState<string>("all");
+  const [profile, setProfile] = useState<InvestorProfile | null>(null);
+  const [account, setAccount] = useState<InvestorAccount | null>(null);
+  const [withdraws, setWithdraws] = useState<WithdrawRequest[]>([]);
+  const [dataErr, setDataErr] = useState<string | null>(null);
+  const [reloading, setReloading] = useState(false);
 
-  // principal adjustments (cloud)
-  const [principalRows, setPrincipalRows] = useState<PrincipalRow[]>([]);
-  const [pMonth, setPMonth] = useState<string>(yyyymm(new Date()));
-  const [pDelta, setPDelta] = useState<number>(0);
-  const [pNote, setPNote] = useState<string>("");
-  const [adminToken, setAdminToken] = useState<string>("");
-  const [principalErr, setPrincipalErr] = useState<string | null>(null);
-  const [principalSaving, setPrincipalSaving] = useState(false);
+  // withdraw form
+  const [wAmount, setWAmount] = useState<number>(100);
+  const [wNote, setWNote] = useState<string>("");
 
-  // load admin token from localStorage
-  useEffect(() => {
-    try {
-      const t = localStorage.getItem("moneyflow.admin_token.v1");
-      if (t) setAdminToken(t);
-    } catch {}
-  }, []);
-  useEffect(() => {
-    try {
-      if (adminToken) localStorage.setItem("moneyflow.admin_token.v1", adminToken);
-    } catch {}
-  }, [adminToken]);
+  const pendingTotalFromList = useMemo(() => {
+    return withdraws
+      .filter((x) => String(x.status || "").toUpperCase() === "PENDING")
+      .reduce((acc, x) => acc + num(x.amount), 0);
+  }, [withdraws]);
 
-  // overview
+  const pendingDisplay = account?.pending_withdraw ?? pendingTotalFromList;
+
+  // 讀登入狀態 + 訂閱變更
   useEffect(() => {
     let mounted = true;
-    async function run() {
-      try {
-        setLoading(true);
-        setErr(null);
-        const r = await fetch("/api/public/overview", { cache: "no-store" });
-        const out = await safeReadJson(r);
 
-        if (!out.ok) {
-          const msg =
-            out.data?.error ||
-            `Failed to fetch overview (HTTP ${out.status})` +
-              (out.raw ? `\n${String(out.raw).slice(0, 220)}` : "");
-          throw new Error(msg);
-        }
-
-        if (!mounted) return;
-        setData(out.data as OverviewResponse);
-      } catch (e: any) {
-        if (!mounted) return;
-        setErr(e?.message || String(e));
-      } finally {
-        if (!mounted) return;
-        setLoading(false);
-      }
+    async function init() {
+      const { data } = await supabaseBrowser.auth.getSession();
+      if (!mounted) return;
+      const u = data.session?.user;
+      setSessionEmail(u?.email ?? null);
+      setUserId(u?.id ?? null);
     }
-    run();
+
+    init();
+
+    const { data: sub } = supabaseBrowser.auth.onAuthStateChange((_event, sess) => {
+      const u = sess?.user;
+      setSessionEmail(u?.email ?? null);
+      setUserId(u?.id ?? null);
+    });
+
     return () => {
       mounted = false;
+      sub.subscription.unsubscribe();
     };
   }, []);
 
-  // ✅ principal API: { total_principal, rows: [...] }
-  async function reloadPrincipal() {
+  async function loadMyData() {
+    setDataErr(null);
+    setProfile(null);
+    setAccount(null);
+    setWithdraws([]);
+
+    const { data: sessOut, error: sessErr } = await supabaseBrowser.auth.getSession();
+    if (sessErr) {
+      setDataErr(sessErr.message);
+      return;
+    }
+    const user = sessOut.session?.user;
+    if (!user) return;
+
     try {
-      setPrincipalErr(null);
-      const r = await fetch("/api/public/principal", { cache: "no-store" });
-      const out = await safeReadJson(r);
+      setReloading(true);
 
-      if (!out.ok) {
-        const msg =
-          out.data?.error ||
-          `Failed to fetch principal (HTTP ${out.status})` +
-            (out.raw ? `\n${String(out.raw).slice(0, 220)}` : "");
-        throw new Error(msg);
-      }
+      // 1) profile
+      const p = await supabaseBrowser
+        .from("investor_profiles")
+        .select("user_id,email,display_name,created_at")
+        .eq("user_id", user.id)
+        .maybeSingle();
 
-      const rows = (out.data?.rows ?? out.data?.data?.rows ?? out.data?.data ?? []) as PrincipalRow[];
-      setPrincipalRows(Array.isArray(rows) ? rows : []);
+      if (p.error) throw new Error(`讀取 investor_profiles 失敗：${p.error.message}`);
+      if (p.data) setProfile(p.data as InvestorProfile);
+
+      // 2) account
+      const a = await supabaseBrowser
+        .from("investor_accounts")
+        .select("user_id,principal,shares,pending_withdraw,created_at,updated_at")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (a.error) throw new Error(`讀取 investor_accounts 失敗：${a.error.message}`);
+      if (a.data) setAccount(a.data as InvestorAccount);
+
+      // 3) withdraw requests
+      const w = await supabaseBrowser
+        .from("investor_withdraw_requests")
+        .select(
+          "id,user_id,amount,status,note,created_at,updated_at,executed_at,executed_nav,share_price,shares_to_redeem"
+        )
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false });
+
+      if (w.error) throw new Error(`讀取 investor_withdraw_requests 失敗：${w.error.message}`);
+      setWithdraws((w.data ?? []) as WithdrawRequest[]);
     } catch (e: any) {
-      setPrincipalErr(e?.message || String(e));
+      setDataErr(e?.message || String(e));
+    } finally {
+      setReloading(false);
     }
   }
 
+  // 登入後自動載入資料
   useEffect(() => {
-    reloadPrincipal();
+    if (!sessionEmail) return;
+    loadMyData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sessionEmail]);
 
-  /**
-   * ✅ addPrincipal() 穩定版（避免 Unexpected end of JSON input）
-   * - 先讀 text 再 parse
-   * - 如果不是 JSON：顯示 HTTP 狀態 + raw 前幾百字
-   */
-  async function addPrincipal() {
+  async function signIn() {
     try {
-      setPrincipalErr(null);
+      setErr(null);
+      setLoadingAuth(true);
 
-      const month = String(pMonth || "").slice(0, 7);
-      const delta = Number(pDelta);
-
-      if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("月份格式要 YYYY-MM");
-      if (!Number.isFinite(delta) || delta === 0)
-        throw new Error("金額不能是 0，正數=入金，負數=出金");
-      if (!adminToken) throw new Error("請先輸入 ADMIN TOKEN（只要輸入一次，會記住）");
-
-      setPrincipalSaving(true);
-
-      const r = await fetch("/api/admin/principal", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-admin-token": adminToken,
-        },
-        body: JSON.stringify({
-          month,
-          delta,
-          note: pNote?.trim() || null,
-        }),
+      const { data, error } = await supabaseBrowser.auth.signInWithPassword({
+        email: email.trim(),
+        password,
       });
 
-      const out = await safeReadJson(r);
-
-      if (!out.ok) {
-        const msg =
-          out.data?.error ||
-          `Failed to save principal adjustment (HTTP ${out.status})` +
-            (out.raw ? `\n${String(out.raw).slice(0, 260)}` : "");
-        throw new Error(msg);
-      }
-
-      setPDelta(0);
-      setPNote("");
-      await reloadPrincipal();
+      if (error) throw error;
+      setSessionEmail(data.user?.email ?? null);
+      setUserId(data.user?.id ?? null);
     } catch (e: any) {
-      setPrincipalErr(e?.message || String(e));
+      setErr(e?.message || String(e));
     } finally {
-      setPrincipalSaving(false);
+      setLoadingAuth(false);
     }
   }
 
-  const lastUpdate = data?.header?.last_update ?? null;
-  const title = data?.header?.title ?? "MoneyFlow Dashboard";
-  const tags = data?.header?.tags ?? ["public", "USDT"];
-  const totalNav = data?.kpi?.total_nav ?? null;
-
-  const navChartData = useMemo(() => {
-    const rows = data?.nav_history ?? [];
-    if (rows.length === 0) return [];
-    if (range === "ALL") return rows;
-    const days = range === "7D" ? 7 : 30;
-    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    return rows.filter((r) => new Date(r.timestamp).getTime() >= cutoff);
-  }, [data, range]);
-
-  /**
-   * ✅ 只有損益線（P&L Only）
-   * - pnl_base = nav - principal_cum(created_at<=t)
-   * - pnl_month = pnl_base - anchor(月初第一筆pnl_base)
-   */
-  const pnlOnlyAllSeries = useMemo(() => {
-    const navAll = [...(data?.nav_history ?? [])].sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    );
-    if (!navAll.length) return [];
-
-    const pr = [...(principalRows ?? [])]
-      .map((r) => ({ created_at: r.created_at, delta: num(r.delta) }))
-      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-
-    let i = 0;
-    let principalCum = 0;
-    const anchorByMonth = new Map<string, number>();
-
-    return navAll.map((p) => {
-      const t = new Date(p.timestamp).getTime();
-      while (i < pr.length && new Date(pr[i].created_at).getTime() <= t) {
-        principalCum += pr[i].delta;
-        i++;
-      }
-
-      const nav = num(p.total_nav);
-      const pnlBase = nav - principalCum;
-
-      const monthKey = monthKeyFromISO(p.timestamp);
-      if (!anchorByMonth.has(monthKey)) anchorByMonth.set(monthKey, pnlBase);
-      const anchor = anchorByMonth.get(monthKey) ?? pnlBase;
-
-      const pnlMonth = pnlBase - anchor;
-
-      return {
-        timestamp: p.timestamp,
-        pnl_month: pnlMonth,
-        pnl_base: pnlBase,
-        principal_cum: principalCum,
-        total_nav: nav,
-        month_key: monthKey,
-      };
-    });
-  }, [data, principalRows]);
-
-  const pnlOnlyChartData = useMemo(() => {
-    if (!pnlOnlyAllSeries.length) return [];
-    if (range === "ALL") return pnlOnlyAllSeries;
-
-    const days = range === "7D" ? 7 : 30;
-    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    return pnlOnlyAllSeries.filter((r) => new Date(r.timestamp).getTime() >= cutoff);
-  }, [pnlOnlyAllSeries, range]);
-
-  const latestPnlOnly = pnlOnlyChartData[pnlOnlyChartData.length - 1];
-  const monthPnl = num(latestPnlOnly?.pnl_month ?? 0);
-  const monthPnlPositive = monthPnl >= 0;
-
-  const lastMonthPnl = useMemo(() => {
-    if (!pnlOnlyAllSeries.length) return null;
-    const pm = prevMonthKey(new Date());
-    const rows = pnlOnlyAllSeries.filter((r: any) => r.month_key === pm);
-    if (!rows.length) return null;
-    const last = rows[rows.length - 1];
-    return { month: pm, value: num(last.pnl_month) };
-  }, [pnlOnlyAllSeries]);
-
-  const lastMonthLine = lastMonthPnl
-    ? `上月損益（${lastMonthPnl.month}）：${lastMonthPnl.value >= 0 ? "+" : ""}${fmtUsd(
-        lastMonthPnl.value
-      )} 美元`
-    : "上月損益：—";
-
-  const categoryOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of data?.positions ?? []) set.add(p.category);
-    return ["all", ...Array.from(set)];
-  }, [data]);
-
-  const chainOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of data?.positions ?? []) set.add(p.chain);
-    return ["all", ...Array.from(set)];
-  }, [data]);
-
-  const filteredPositions = useMemo(() => {
-    const rows = data?.positions ?? [];
-    const q = search.trim().toLowerCase();
-
-    return rows.filter((p) => {
-      if (categoryFilter !== "all" && p.category !== categoryFilter) return false;
-      if (chainFilter !== "all" && p.chain !== chainFilter) return false;
-
-      if (!q) return true;
-      const hay = `${p.asset} ${p.chain} ${p.category} ${p.source}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }, [data, search, categoryFilter, chainFilter]);
-
-  const allocation = data?.allocation ?? [];
-  const dist = data?.distribution ?? [];
-  const distTotal = useMemo(() => dist.reduce((acc, x) => acc + num(x.value_usdt), 0), [dist]);
-
-  if (loading) {
-    return (
-      <div className="min-h-screen p-10" style={{ background: THEME.bg, color: THEME.muted }}>
-        <div className="text-sm">Loading…</div>
-      </div>
-    );
+  async function signOut() {
+    await supabaseBrowser.auth.signOut();
+    setSessionEmail(null);
+    setUserId(null);
+    setProfile(null);
+    setAccount(null);
+    setWithdraws([]);
   }
 
-  if (err) {
-    return (
-      <div className="min-h-screen p-10" style={{ background: THEME.bg, color: THEME.muted }}>
-        <div className="font-semibold" style={{ color: THEME.bad }}>
-          Error
-        </div>
-        <div className="mt-2 text-sm" style={{ color: THEME.muted }}>
-          {err}
-        </div>
-      </div>
-    );
+  async function submitWithdraw() {
+    try {
+      setDataErr(null);
+      const amt = Number(wAmount);
+      if (!Number.isFinite(amt) || amt <= 0) throw new Error("提款金額需為正數");
+
+      const { data: sessOut, error: sessErr } = await supabaseBrowser.auth.getSession();
+      if (sessErr) throw sessErr;
+      const user = sessOut.session?.user;
+      if (!user) throw new Error("尚未登入");
+
+      // 插入一筆 PENDING（user_id 用 RLS 保護）
+      const note = wNote?.trim() ? wNote.trim() : `from_ui_${new Date().toISOString().slice(0, 10).replaceAll("-", "")}_${String(Date.now()).slice(-4)}`;
+
+      const ins = await supabaseBrowser
+        .from("investor_withdraw_requests")
+        .insert([
+          {
+            user_id: user.id,
+            amount: amt,
+            status: "PENDING",
+            note,
+          },
+        ])
+        .select("id")
+        .maybeSingle();
+
+      if (ins.error) throw new Error(`送出提款申請失敗：${ins.error.message}`);
+
+      setWAmount(100);
+      setWNote("");
+      await loadMyData();
+    } catch (e: any) {
+      setDataErr(e?.message || String(e));
+    }
   }
 
-  if (!data) {
-    return (
-      <div className="min-h-screen p-10" style={{ background: THEME.bg, color: THEME.muted }}>
-        <div className="text-sm">No data</div>
-      </div>
-    );
+  async function cancelWithdraw(id: number) {
+    try {
+      setDataErr(null);
+      const { data: sessOut, error: sessErr } = await supabaseBrowser.auth.getSession();
+      if (sessErr) throw sessErr;
+      const user = sessOut.session?.user;
+      if (!user) throw new Error("尚未登入");
+
+      // 只允許取消自己的 PENDING
+      const upd = await supabaseBrowser
+        .from("investor_withdraw_requests")
+        .update({ status: "CANCELLED" })
+        .eq("id", id)
+        .eq("user_id", user.id)
+        .eq("status", "PENDING")
+        .select("id")
+        .maybeSingle();
+
+      if (upd.error) throw new Error(`取消失敗：${upd.error.message}`);
+      await loadMyData();
+    } catch (e: any) {
+      setDataErr(e?.message || String(e));
+    }
   }
+
+  const tags = ["investor", "RLS"];
 
   return (
     <div className="min-h-screen" style={{ background: THEME.bg, color: THEME.text }}>
-      {/* 背景 */}
+      {/* 背景（跟首頁一致） */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div
           className="absolute -top-44 -left-44 h-[560px] w-[560px] rounded-full blur-3xl"
@@ -617,7 +475,7 @@ export default function Page() {
       </div>
 
       <div className="relative mx-auto max-w-6xl px-6 py-10">
-        {/* Header */}
+        {/* Header（對齊首頁語氣） */}
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-start gap-3">
             <div className="mt-1">
@@ -626,21 +484,68 @@ export default function Page() {
 
             <div>
               <h1 className="text-3xl font-semibold tracking-tight">
-                {title}
+                Investor Portal
                 <span className="ml-3 align-middle text-xs font-semibold" style={{ color: THEME.muted }}>
-                  Wealth Console
+                  Private (RLS)
                 </span>
               </h1>
               <div className="mt-2 text-sm" style={{ color: THEME.muted }}>
-                最後更新：{" "}
-                <span className="font-medium" style={{ color: THEME.text }}>
-                  {formatTime(lastUpdate)}
-                </span>
+                {sessionEmail ? (
+                  <>
+                    已登入：{" "}
+                    <span className="font-medium" style={{ color: THEME.text }}>
+                      {sessionEmail}
+                    </span>
+                  </>
+                ) : (
+                  <>請先登入（Email / Password）</>
+                )}
               </div>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <Link
+              href="/"
+              className="rounded-full border px-3 py-1 text-xs font-semibold transition"
+              style={{
+                borderColor: "rgba(255,255,255,0.25)",
+                color: "rgba(255,255,255,0.95)",
+                background: "rgba(255,255,255,0.10)",
+              }}
+            >
+              回到 Dashboard
+            </Link>
+
+            {sessionEmail ? (
+              <>
+                <button
+                  onClick={loadMyData}
+                  className="rounded-full border px-3 py-1 text-xs font-semibold transition"
+                  style={{
+                    borderColor: "rgba(226,198,128,0.35)",
+                    color: THEME.gold2,
+                    background: "rgba(212,175,55,0.10)",
+                    opacity: reloading ? 0.7 : 1,
+                  }}
+                >
+                  {reloading ? "載入中…" : "重新載入"}
+                </button>
+
+                <button
+                  onClick={signOut}
+                  className="rounded-full border px-3 py-1 text-xs font-semibold transition"
+                  style={{
+                    borderColor: "rgba(239,68,68,0.35)",
+                    color: "rgba(252,165,165,0.95)",
+                    background: "rgba(239,68,68,0.10)",
+                  }}
+                >
+                  登出
+                </button>
+              </>
+            ) : null}
+
             {tags.map((t, i) => (
               <span
                 key={t}
@@ -657,467 +562,360 @@ export default function Page() {
           </div>
         </div>
 
-        {/* KPI */}
-        <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Card accent="gold">
-            <Metric label="總淨值" value={`${fmtUsd(totalNav)} 美元`} sub="USD" />
-          </Card>
-
-          <Card accent={monthPnlPositive ? "good" : "bad"}>
-            <Metric
-              label="本月損益"
-              value={`${monthPnlPositive ? "+" : ""}${fmtUsd(monthPnl)} 美元`}
-              sub={`MTD\n${lastMonthLine}`}
-              tone={monthPnlPositive ? "good" : "bad"}
-            />
-          </Card>
-
-          <Card accent="navy" title="分配" subtitle="按類別匯總">
-            <div className="space-y-2">
-              {allocation.length === 0 ? (
-                <div className="text-sm" style={{ color: THEME.muted }}>
-                  —
+        {/* 未登入：登入卡 */}
+        {!sessionEmail ? (
+          <div className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card accent="gold" title="登入" subtitle="使用 Supabase Auth（Email/Password）">
+              <div className="space-y-4">
+                <div>
+                  <div className="mb-1 text-xs" style={{ color: THEME.muted }}>
+                    Email
+                  </div>
+                  <input
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
+                    style={{
+                      borderColor: "rgba(226,198,128,0.18)",
+                      background: "rgba(255,255,255,0.03)",
+                      color: THEME.text,
+                    }}
+                  />
                 </div>
-              ) : (
-                allocation
-                  .slice()
-                  .sort((a, b) => (b.value_usdt ?? 0) - (a.value_usdt ?? 0))
-                  .map((a, idx) => (
-                    <div key={a.category} className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className="h-2 w-2 rounded-full"
-                          style={{
-                            background: PIE_PALETTE[idx % PIE_PALETTE.length],
-                            boxShadow: "0 0 12px rgba(212,175,55,0.18)",
-                          }}
-                        />
-                        <span style={{ color: THEME.muted }}>{a.label}</span>
-                      </div>
-                      <div className="font-semibold" style={{ color: THEME.text }}>
-                        ${fmtUsd(a.value_usdt)} 美元
-                      </div>
+
+                <div>
+                  <div className="mb-1 text-xs" style={{ color: THEME.muted }}>
+                    Password
+                  </div>
+                  <input
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    type="password"
+                    className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
+                    style={{
+                      borderColor: "rgba(226,198,128,0.18)",
+                      background: "rgba(255,255,255,0.03)",
+                      color: THEME.text,
+                    }}
+                  />
+                </div>
+
+                <button
+                  onClick={signIn}
+                  disabled={loadingAuth}
+                  className="w-full rounded-xl px-3 py-2 text-sm font-semibold transition-opacity"
+                  style={{
+                    background: THEME.gold2,
+                    color: "#0B0E14",
+                    opacity: loadingAuth ? 0.7 : 1,
+                  }}
+                >
+                  {loadingAuth ? "登入中…" : "登入"}
+                </button>
+
+                {err ? (
+                  <div className="text-sm whitespace-pre-line" style={{ color: THEME.bad }}>
+                    {err}
+                  </div>
+                ) : null}
+
+                <div className="text-xs" style={{ color: THEME.muted }}>
+                  提醒：你在 Supabase Auth 新增使用者後，trigger 會自動建立 investor_accounts / investor_profiles。
+                </div>
+              </div>
+            </Card>
+
+            <Card
+              accent="navy"
+              title="提款規則（MVP）"
+              subtitle="前端送出 → PENDING；快照成交 → UNPAID；你出金後 → PAID"
+            >
+              <ol className="mt-1 list-decimal space-y-2 pl-5 text-sm" style={{ color: THEME.muted }}>
+                <li>投資人輸入提款 U 金額 → 產生 PENDING</li>
+                <li>下一次快照時自動成交（forward pricing）→ UNPAID</li>
+                <li>你手動轉帳後（Admin）標記 PAID</li>
+                <li>投資人只看得到自己的資料（RLS）</li>
+              </ol>
+            </Card>
+          </div>
+        ) : (
+          <>
+            {/* 登入狀態卡 */}
+            <div className="mt-8">
+              <Card
+                accent="gold"
+                title="登入成功 ✅"
+                subtitle="下面資料皆走 RLS（只會看到你自己的 investor_accounts / withdraw_requests）"
+                right={
+                  <div className="text-xs text-right" style={{ color: THEME.muted }}>
+                    user_id
+                    <div className="mt-1 font-semibold" style={{ color: THEME.text }}>
+                      {userId ?? "—"}
                     </div>
-                  ))
-              )}
-            </div>
-          </Card>
-        </div>
-
-        {/* Charts row 1 */}
-        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <Card
-            className="lg:col-span-2"
-            accent="gold"
-            title="淨值歷史"
-            subtitle="基於 nav_snapshots"
-            right={
-              <div className="flex items-center gap-2">
-                {(["7D", "30D", "ALL"] as const).map((k) => {
-                  const active = range === k;
-                  return (
-                    <button
-                      key={k}
-                      onClick={() => setRange(k)}
-                      className="rounded-full border px-3 py-1 text-xs font-semibold transition-colors"
-                      style={{
-                        borderColor: active ? "rgba(226,198,128,0.42)" : "rgba(148,163,184,0.16)",
-                        background: active ? "rgba(212,175,55,0.14)" : "rgba(255,255,255,0.03)",
-                        color: active ? THEME.gold2 : THEME.muted,
-                        boxShadow: active ? "0 0 18px rgba(212,175,55,0.14)" : undefined,
-                      }}
-                    >
-                      {k === "ALL" ? "全部" : k}
-                    </button>
-                  );
-                })}
-              </div>
-            }
-          >
-            <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={navChartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="4 4" stroke="rgba(148,163,184,0.16)" />
-                  <XAxis
-                    dataKey="timestamp"
-                    tickFormatter={(v) => shortDate(v)}
-                    minTickGap={28}
-                    tick={{ fontSize: 12, fill: "rgba(255,255,255,0.55)" }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tickFormatter={(v) => `${Math.round(v)}`}
-                    width={52}
-                    tick={{ fontSize: 12, fill: "rgba(255,255,255,0.55)" }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <Tooltip content={<LineTooltip />} />
-                  <Line
-                    type="monotone"
-                    dataKey="total_nav"
-                    stroke={THEME.gold2}
-                    strokeWidth={2.9}
-                    dot={false}
-                    activeDot={{ r: 4, fill: THEME.gold2, stroke: "rgba(255,255,255,0.35)" }}
-                    style={{ filter: "drop-shadow(0 0 12px rgba(212,175,55,0.28))" }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </Card>
-
-          <Card accent="navy" title="分配" subtitle="按鏈（點擊篩選）">
-            <div className="relative h-72">
-              <DoughnutCenter total={distTotal} />
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={dist}
-                    dataKey="value_usdt"
-                    nameKey="chain"
-                    innerRadius="58%"
-                    outerRadius="86%"
-                    paddingAngle={2}
-                    stroke="rgba(255,255,255,0.14)"
-                    onClick={(payload: any) => {
-                      const clicked = payload?.payload?.chain;
-                      if (!clicked) return;
-                      setChainFilter((cur) => (cur === clicked ? "all" : clicked));
-                    }}
-                  >
-                    {dist.map((_, idx) => (
-                      <Cell key={idx} fill={PIE_PALETTE[idx % PIE_PALETTE.length]} />
-                    ))}
-                  </Pie>
-
-                  <Tooltip
-                    formatter={(v: any) => `$${fmtUsd(v)}`}
-                    contentStyle={{
-                      borderRadius: 12,
-                      border: "1px solid rgba(226,198,128,0.18)",
-                      background: "rgba(5,7,10,0.82)",
-                      color: THEME.text,
-                    }}
-                  />
-                  <Legend wrapperStyle={{ color: "rgba(255,255,255,0.72)" }} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="mt-2 text-xs" style={{ color: THEME.muted }}>
-              當前鏈過濾器：{" "}
-              <span className="font-semibold" style={{ color: THEME.gold2 }}>
-                {chainFilter === "all" ? "全部" : chainFilter}
-              </span>
-            </div>
-          </Card>
-        </div>
-
-        {/* Charts row 2 */}
-        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-          <Card
-            className="lg:col-span-2"
-            accent="good"
-            title="本月損益（PnL Only）"
-            subtitle="每月歸零；入金/出金請用右側 delta 抵消（入金填 +、出金填 -）"
-            right={
-              <div className="text-right text-xs" style={{ color: THEME.muted }}>
-                最新本月損益：{" "}
-                <span style={{ color: THEME.text, fontWeight: 700 }}>
-                  ${fmtUsd(latestPnlOnly?.pnl_month ?? 0)}
-                </span>
-              </div>
-            }
-          >
-            <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={pnlOnlyChartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="4 4" stroke="rgba(148,163,184,0.16)" />
-                  <XAxis
-                    dataKey="timestamp"
-                    tickFormatter={(v) => shortDate(v)}
-                    minTickGap={28}
-                    tick={{ fontSize: 12, fill: "rgba(255,255,255,0.55)" }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tickFormatter={(v) => `${Math.round(v)}`}
-                    width={52}
-                    tick={{ fontSize: 12, fill: "rgba(255,255,255,0.55)" }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    formatter={(v: any) => [`$${fmtUsd(v)}`, "本月損益"]}
-                    labelFormatter={(l) => formatTime(l)}
-                    contentStyle={{
-                      borderRadius: 12,
-                      border: "1px solid rgba(226,198,128,0.18)",
-                      background: "rgba(5,7,10,0.82)",
-                      color: THEME.text,
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="pnl_month"
-                    name="pnl_month"
-                    stroke={THEME.good}
-                    strokeWidth={2.6}
-                    dot={false}
-                    style={{ filter: "drop-shadow(0 0 10px rgba(34,197,94,0.22))" }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </Card>
-
-          <Card accent="gold" title="本金調整（雲端）" subtitle="用來抵消入金/出金；正數=入金，負數=出金">
-            <div className="space-y-3">
-              <div>
-                <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                  ADMIN TOKEN（只要輸入一次，會記住）
-                </div>
-                <input
-                  value={adminToken}
-                  onChange={(e) => setAdminToken(e.target.value)}
-                  placeholder="貼上你在 Vercel 設的 ADMIN_TOKEN"
-                  className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
-                  style={{
-                    borderColor: "rgba(226,198,128,0.18)",
-                    background: "rgba(255,255,255,0.03)",
-                    color: THEME.text,
-                  }}
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                    月份（YYYY-MM）
                   </div>
-                  <input
-                    value={pMonth}
-                    onChange={(e) => setPMonth(e.target.value)}
-                    placeholder="2026-02"
-                    className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
-                    style={{
-                      borderColor: "rgba(226,198,128,0.18)",
-                      background: "rgba(255,255,255,0.03)",
-                      color: THEME.text,
-                    }}
-                  />
-                </div>
-                <div>
-                  <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                    金額（+ / -）
+                }
+              >
+                {dataErr ? (
+                  <div className="text-sm whitespace-pre-line" style={{ color: THEME.bad }}>
+                    {dataErr}
                   </div>
-                  <input
-                    value={pDelta}
-                    onChange={(e) => setPDelta(Number(e.target.value))}
-                    type="number"
-                    placeholder="+50 入金 / -50 出金"
-                    className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
-                    style={{
-                      borderColor: "rgba(226,198,128,0.18)",
-                      background: "rgba(255,255,255,0.03)",
-                      color: THEME.text,
-                    }}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                  備註（可空）
-                </div>
-                <input
-                  value={pNote}
-                  onChange={(e) => setPNote(e.target.value)}
-                  placeholder="例如：投資人入金 50（抵消）"
-                  className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
-                  style={{
-                    borderColor: "rgba(226,198,128,0.18)",
-                    background: "rgba(255,255,255,0.03)",
-                    color: THEME.text,
-                  }}
-                />
-              </div>
-
-              <button
-                disabled={principalSaving}
-                onClick={addPrincipal}
-                className="w-full rounded-xl px-3 py-2 text-sm font-semibold transition-opacity"
-                style={{
-                  background: THEME.gold2,
-                  color: "#0B0E14",
-                  opacity: principalSaving ? 0.7 : 1,
-                }}
-              >
-                {principalSaving ? "儲存中…" : "新增一筆（雲端）"}
-              </button>
-
-              <button
-                onClick={reloadPrincipal}
-                className="w-full rounded-xl border px-3 py-2 text-sm font-semibold"
-                style={{
-                  borderColor: "rgba(226,198,128,0.18)",
-                  background: "rgba(255,255,255,0.03)",
-                  color: THEME.text,
-                }}
-              >
-                重新載入本金紀錄
-              </button>
-
-              {principalErr ? (
-                <div className="text-xs whitespace-pre-line" style={{ color: THEME.bad }}>
-                  {principalErr}
-                </div>
-              ) : null}
-
-              <div
-                className="mt-2 max-h-48 overflow-auto rounded-xl border p-3 text-xs"
-                style={{
-                  borderColor: "rgba(255,255,255,0.10)",
-                  background: "rgba(0,0,0,0.18)",
-                  color: THEME.muted,
-                }}
-              >
-                {principalRows.length === 0 ? (
-                  <div>尚無紀錄</div>
                 ) : (
-                  <div className="space-y-2">
-                    {principalRows
-                      .slice()
-                      .sort((a, b) => (a.created_at > b.created_at ? -1 : 1))
-                      .map((r) => (
-                        <div key={r.id} className="flex items-center justify-between">
-                          <div>
-                            <span className="font-semibold" style={{ color: THEME.text }}>
-                              {r.month}
-                            </span>{" "}
-                            <span style={{ color: THEME.muted }}>{r.note || ""}</span>
-                          </div>
-                          <div style={{ color: THEME.gold2, fontWeight: 700 }}>
-                            {num(r.delta) >= 0 ? "+" : ""}
-                            {fmtUsd(r.delta)}
-                          </div>
-                        </div>
-                      ))}
+                  <div className="text-xs" style={{ color: THEME.muted }}>
+                    最後更新：{formatTime(new Date().toISOString())}
                   </div>
                 )}
-              </div>
+              </Card>
             </div>
-          </Card>
-        </div>
 
-        {/* Positions */}
-        <Card
-          className="mt-6"
-          accent="gold"
-          title="持倉明細"
-          subtitle={`${filteredPositions.length} 行`}
-          right={
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="搜尋 資產 / 鏈 / 類別"
-                className="w-full sm:w-80 rounded-xl border px-3 py-2 text-sm outline-none"
-                style={{
-                  borderColor: "rgba(226,198,128,0.18)",
-                  background: "rgba(255,255,255,0.03)",
-                  color: THEME.text,
-                }}
-              />
+            {/* KPI */}
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+              <Card accent="gold">
+                <Metric label="淨入金（principal）" value={`${fmt(account?.principal)} U`} sub="由入金/出金流程更新" />
+              </Card>
 
-              <select
-                value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-                className="rounded-xl border px-3 py-2 text-sm"
-                style={{
-                  borderColor: "rgba(226,198,128,0.18)",
-                  background: "rgba(255,255,255,0.03)",
-                  color: THEME.text,
-                }}
-              >
-                {categoryOptions.map((c) => (
-                  <option key={c} value={c} className="bg-[#07090D]">
-                    {c === "all" ? "所有類別" : c}
-                  </option>
-                ))}
-              </select>
+              <Card accent="navy">
+                <Metric label="持有 shares" value={`${fmt(account?.shares)}`} sub="下一步接 share price / NAV" />
+              </Card>
 
-              <select
-                value={chainFilter}
-                onChange={(e) => setChainFilter(e.target.value)}
-                className="rounded-xl border px-3 py-2 text-sm"
-                style={{
-                  borderColor: "rgba(226,198,128,0.18)",
-                  background: "rgba(255,255,255,0.03)",
-                  color: THEME.text,
-                }}
-              >
-                {chainOptions.map((c) => (
-                  <option key={c} value={c} className="bg-[#07090D]">
-                    {c === "all" ? "所有鏈" : c}
-                  </option>
-                ))}
-              </select>
+              <Card accent="good">
+                <Metric label="待提款（pending_withdraw）" value={`${fmt(pendingDisplay)} U`} sub="PENDING 會先累加在這裡" />
+              </Card>
             </div>
-          }
-        >
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-sm">
-              <thead>
-                <tr
-                  className="border-b text-left"
-                  style={{ borderColor: "rgba(226,198,128,0.18)", color: THEME.muted }}
-                >
-                  <th className="py-3 pr-4">資產</th>
-                  <th className="py-3 pr-4 text-right">金額</th>
-                  <th className="py-3 pr-4 text-right">價值（USD）</th>
-                  <th className="py-3">鏈</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredPositions.map((p, idx) => (
-                  <tr
-                    key={idx}
-                    className="border-b transition-colors"
-                    style={{ borderColor: "rgba(255,255,255,0.06)" }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLTableRowElement).style.background =
-                        "rgba(212,175,55,0.06)";
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLTableRowElement).style.background = "transparent";
+
+            {/* 提款申請（輸入） */}
+            <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <Card
+                className="lg:col-span-2"
+                accent="gold"
+                title="提款申請（輸入 U 金額）"
+                subtitle="送出後會在 investor_withdraw_requests 新增一筆 PENDING"
+                right={
+                  <button
+                    onClick={loadMyData}
+                    className="rounded-full border px-3 py-1 text-xs font-semibold transition"
+                    style={{
+                      borderColor: "rgba(226,198,128,0.35)",
+                      color: THEME.gold2,
+                      background: "rgba(212,175,55,0.10)",
+                      opacity: reloading ? 0.7 : 1,
                     }}
                   >
-                    <td className="py-3 pr-4" style={{ color: THEME.gold2, fontWeight: 700 }}>
-                      {p.asset}
-                    </td>
-                    <td className="py-3 pr-4 text-right" style={{ color: THEME.muted }}>
-                      {p.amount == null ? "—" : String(p.amount)}
-                    </td>
-                    <td className="py-3 pr-4 text-right font-semibold" style={{ color: THEME.text }}>
-                      ${fmtUsd(p.value_usdt)}
-                    </td>
-                    <td className="py-3" style={{ color: THEME.muted }}>
-                      {p.chain}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                    {reloading ? "整理中…" : "重新整理列表"}
+                  </button>
+                }
+              >
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div>
+                    <div className="mb-1 text-xs" style={{ color: THEME.muted }}>
+                      提款金額（U）
+                    </div>
+                    <input
+                      value={wAmount}
+                      onChange={(e) => setWAmount(Number(e.target.value))}
+                      type="number"
+                      className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
+                      style={{
+                        borderColor: "rgba(226,198,128,0.18)",
+                        background: "rgba(255,255,255,0.03)",
+                        color: THEME.text,
+                      }}
+                    />
+                  </div>
 
-          <div className="mt-3 text-xs" style={{ color: THEME.faint }}>
-            Note: PnL uses diff_mode=prev until you have enough 24h history.
-          </div>
-        </Card>
+                  <div>
+                    <div className="mb-1 text-xs" style={{ color: THEME.muted }}>
+                      備註（可空）
+                    </div>
+                    <input
+                      value={wNote}
+                      onChange={(e) => setWNote(e.target.value)}
+                      placeholder="例如：本月提領"
+                      className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
+                      style={{
+                        borderColor: "rgba(226,198,128,0.18)",
+                        background: "rgba(255,255,255,0.03)",
+                        color: THEME.text,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    onClick={submitWithdraw}
+                    className="rounded-xl px-4 py-2 text-sm font-semibold transition-opacity"
+                    style={{ background: THEME.gold2, color: "#0B0E14" }}
+                  >
+                    提交申請
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setWAmount(100);
+                      setWNote("");
+                    }}
+                    className="rounded-xl border px-4 py-2 text-sm font-semibold"
+                    style={{
+                      borderColor: "rgba(226,198,128,0.18)",
+                      background: "rgba(255,255,255,0.03)",
+                      color: THEME.text,
+                    }}
+                  >
+                    清空
+                  </button>
+                </div>
+              </Card>
+
+              {/* profile */}
+              <Card accent="navy" title="你的 profile" subtitle="來自 investor_profiles（RLS）">
+                <div
+                  className="rounded-xl border p-4 text-sm"
+                  style={{
+                    borderColor: "rgba(255,255,255,0.10)",
+                    background: "rgba(0,0,0,0.18)",
+                    color: THEME.muted,
+                  }}
+                >
+                  <div className="text-xs" style={{ color: THEME.muted }}>
+                    user_id
+                  </div>
+                  <div className="mt-1 font-semibold" style={{ color: THEME.text }}>
+                    {profile?.user_id ?? userId ?? "—"}
+                  </div>
+
+                  <div className="mt-3 text-xs" style={{ color: THEME.muted }}>
+                    email
+                  </div>
+                  <div className="mt-1 font-semibold" style={{ color: THEME.text }}>
+                    {profile?.email ?? sessionEmail ?? "—"}
+                  </div>
+
+                  <div className="mt-3 text-xs" style={{ color: THEME.muted }}>
+                    display_name
+                  </div>
+                  <div className="mt-1 font-semibold" style={{ color: THEME.text }}>
+                    {profile?.display_name ?? "—"}
+                  </div>
+                </div>
+
+                <div className="mt-3 text-xs" style={{ color: THEME.faint }}>
+                  下一步我們會做：快照將 PENDING 成交（forward pricing）→ UNPAID，並寫入 executed_at / share_price / shares_to_redeem。
+                </div>
+              </Card>
+            </div>
+
+            {/* 提款列表 */}
+            <div className="mt-6">
+              <Card
+                accent="gold"
+                title="提款申請"
+                subtitle="只會看到你自己的資料（RLS）"
+                right={
+                  <div className="text-xs" style={{ color: THEME.muted }}>
+                    共 {withdraws.length} 筆
+                  </div>
+                }
+              >
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-sm">
+                    <thead>
+                      <tr
+                        className="border-b text-left"
+                        style={{ borderColor: "rgba(226,198,128,0.18)", color: THEME.muted }}
+                      >
+                        <th className="py-3 pr-4">時間</th>
+                        <th className="py-3 pr-4 text-right">金額(U)</th>
+                        <th className="py-3 pr-4">狀態</th>
+                        <th className="py-3 pr-4">備註</th>
+                        <th className="py-3">操作</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {withdraws.length === 0 ? (
+                        <tr>
+                          <td className="py-6 text-sm" colSpan={5} style={{ color: THEME.muted }}>
+                            尚無提款申請
+                          </td>
+                        </tr>
+                      ) : (
+                        withdraws.map((w) => {
+                          const status = String(w.status || "—").toUpperCase();
+                          const st = badgeStyle(status);
+                          const canCancel = status === "PENDING";
+
+                          return (
+                            <tr
+                              key={w.id}
+                              className="border-b"
+                              style={{ borderColor: "rgba(255,255,255,0.06)" }}
+                              onMouseEnter={(e) => {
+                                (e.currentTarget as HTMLTableRowElement).style.background =
+                                  "rgba(212,175,55,0.06)";
+                              }}
+                              onMouseLeave={(e) => {
+                                (e.currentTarget as HTMLTableRowElement).style.background = "transparent";
+                              }}
+                            >
+                              <td className="py-3 pr-4" style={{ color: THEME.muted }}>
+                                {formatTime(w.created_at)}
+                              </td>
+
+                              <td className="py-3 pr-4 text-right" style={{ color: THEME.text, fontWeight: 700 }}>
+                                {fmt(w.amount)}
+                              </td>
+
+                              <td className="py-3 pr-4">
+                                <span
+                                  className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold"
+                                  style={{
+                                    borderColor: st.border,
+                                    background: st.bg,
+                                    color: st.color,
+                                  }}
+                                >
+                                  {status}
+                                </span>
+                              </td>
+
+                              <td className="py-3 pr-4" style={{ color: THEME.muted }}>
+                                {w.note ?? "—"}
+                              </td>
+
+                              <td className="py-3">
+                                {canCancel ? (
+                                  <button
+                                    onClick={() => cancelWithdraw(w.id)}
+                                    className="rounded-xl border px-3 py-1.5 text-xs font-semibold"
+                                    style={{
+                                      borderColor: "rgba(226,198,128,0.18)",
+                                      background: "rgba(255,255,255,0.03)",
+                                      color: THEME.text,
+                                    }}
+                                  >
+                                    取消
+                                  </button>
+                                ) : (
+                                  <span className="text-xs" style={{ color: THEME.faint }}>
+                                    —
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-3 text-xs" style={{ color: THEME.faint }}>
+                  Tip：如果你看到「PENDING → UNPAID」是在 GitHub Actions 快照跑完後發生的，代表你的成交流程已接上。
+                </div>
+              </Card>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
