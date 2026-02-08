@@ -2,6 +2,13 @@
 
 import React from "react";
 
+export function clsx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+/**
+ * MoneyFlow GOLD theme (shared)
+ */
 export const THEME = {
   bg: "#07090D",
   bg2: "#0B0E14",
@@ -23,46 +30,83 @@ export const THEME = {
 
 export const PIE_PALETTE = [THEME.gold, THEME.navy2, "#94a3b8", "#f59e0b", "#38bdf8"];
 
-export function clsx(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
-export function MfBackground() {
+/**
+ * Shell: same background + container as homepage
+ */
+export function Shell({
+  children,
+  className,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <div className="pointer-events-none fixed inset-0 overflow-hidden">
-      <div
-        className="absolute -top-44 -left-44 h-[560px] w-[560px] rounded-full blur-3xl"
-        style={{ background: "rgba(212,175,55,0.16)" }}
-      />
-      <div
-        className="absolute top-10 -right-48 h-[620px] w-[620px] rounded-full blur-3xl"
-        style={{ background: "rgba(29,78,216,0.10)" }}
-      />
-      <div
-        className="absolute bottom-0 left-1/4 h-[680px] w-[680px] rounded-full blur-3xl"
-        style={{ background: "rgba(242,210,125,0.06)" }}
-      />
-      <div
-        className="absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(1200px 700px at 50% 30%, rgba(255,255,255,0.06), rgba(0,0,0,0.0) 55%), radial-gradient(900px 700px at 50% 110%, rgba(0,0,0,0.55), rgba(0,0,0,0.92))",
-          opacity: 0.9,
-        }}
-      />
-    </div>
-  );
-}
+    <div className={clsx("min-h-screen", className)} style={{ background: THEME.bg, color: THEME.text }}>
+      {/* background blobs */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div
+          className="absolute -top-44 -left-44 h-[560px] w-[560px] rounded-full blur-3xl"
+          style={{ background: "rgba(212,175,55,0.16)" }}
+        />
+        <div
+          className="absolute top-10 -right-48 h-[620px] w-[620px] rounded-full blur-3xl"
+          style={{ background: "rgba(29,78,216,0.10)" }}
+        />
+        <div
+          className="absolute bottom-0 left-1/4 h-[680px] w-[680px] rounded-full blur-3xl"
+          style={{ background: "rgba(242,210,125,0.06)" }}
+        />
+        <div
+          className="absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(1200px 700px at 50% 30%, rgba(255,255,255,0.06), rgba(0,0,0,0.0) 55%), radial-gradient(900px 700px at 50% 110%, rgba(0,0,0,0.55), rgba(0,0,0,0.92))",
+            opacity: 0.9,
+          }}
+        />
+      </div>
 
-export function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="min-h-screen" style={{ background: THEME.bg, color: THEME.text }}>
-      <MfBackground />
       <div className="relative mx-auto max-w-6xl px-6 py-10">{children}</div>
     </div>
   );
 }
 
+/**
+ * Button
+ */
+export function Button({
+  children,
+  onClick,
+  disabled,
+  className,
+  variant = "ghost",
+  type = "button",
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  className?: string;
+  variant?: "ghost" | "solid";
+  type?: "button" | "submit";
+}) {
+  const base = "rounded-xl px-4 py-2 text-sm font-semibold transition";
+  const ghost = "border border-white/12 bg-white/5 hover:bg-white/10";
+  const solid = "bg-white text-black hover:opacity-90 disabled:opacity-60";
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      className={clsx(base, variant === "solid" ? solid : ghost, className)}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Card (same as homepage card)
+ */
 export function Card({
   title,
   subtitle,

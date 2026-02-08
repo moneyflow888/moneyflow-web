@@ -48,6 +48,26 @@ type PrincipalRow = {
   created_at: string;
 };
 
+type WithdrawQueueRow = {
+  id: number;
+  user_id: string;
+  amount: number | string | null;
+  status: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  executed_at?: string | null;
+};
+
+/** ✅ WTD 手動調整（雲端） */
+type WtdAdjustmentRow = {
+  id: number;
+  week_start: string; // YYYY-MM-DD（週日起點）
+  delta_usd: number | string;
+  note: string | null;
+  created_at: string;
+};
+
 function num(v: any): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -81,21 +101,6 @@ function shortDate(ts: string) {
   const hh = String(d.getHours()).padStart(2, "0");
   const mi = String(d.getMinutes()).padStart(2, "0");
   return `${mm}/${dd} ${hh}:${mi}`;
-}
-
-function yyyymm(d: Date) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
-function monthKeyFromISO(ts: string) {
-  return String(ts).slice(0, 7);
-}
-
-function prevMonthKey(now = new Date()) {
-  const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  return yyyymm(d);
 }
 
 /** ✅ 穩定版：先讀 text 再 parse */
@@ -145,7 +150,41 @@ function DoughnutCenter({ total }: { total: number }) {
   );
 }
 
+/** ====== ✅ 週日為一週起點（週日歸零） ====== */
+function startOfWeekSunday(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  const day = x.getDay(); // 0=Sun ... 6=Sat
+  x.setDate(x.getDate() - day);
+  return x;
+}
+
+function yyyymmdd(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+function weekKeyFromISO(ts: string) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts).slice(0, 10);
+  return yyyymmdd(startOfWeekSunday(d)); // 週起點（週日）YYYY-MM-DD
+}
+
+function prevWeekKey(now = new Date()) {
+  const d = new Date(now);
+  d.setDate(d.getDate() - 7);
+  return yyyymmdd(startOfWeekSunday(d));
+}
+
 export default function Page() {
+  // ✅ 只隱藏「本金調整（雲端）」的下方列表視窗（不要影響 WTD / 其他視窗）
+  const HIDE_PRINCIPAL_LIST = true;
+
+  // ✅ 提款申請總覽：下拉式（避免頁面太長）
+  const [wdOpen, setWdOpen] = useState<boolean>(false);
+
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -155,16 +194,32 @@ export default function Page() {
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [chainFilter, setChainFilter] = useState<string>("all");
 
-  // principal adjustments (cloud)
+  // principal adjustments (cloud) — 只保留「讀取/列表」
   const [principalRows, setPrincipalRows] = useState<PrincipalRow[]>([]);
-  const [pMonth, setPMonth] = useState<string>(yyyymm(new Date()));
-  const [pDelta, setPDelta] = useState<number>(0);
-  const [pNote, setPNote] = useState<string>("");
-  const [adminToken, setAdminToken] = useState<string>("");
   const [principalErr, setPrincipalErr] = useState<string | null>(null);
-  const [principalSaving, setPrincipalSaving] = useState(false);
 
-  // load admin token from localStorage
+  // ✅ WTD 手動調整（雲端）— 不動
+  const [wtdAdjRows, setWtdAdjRows] = useState<WtdAdjustmentRow[]>([]);
+  const [wtdAdjDelta, setWtdAdjDelta] = useState<number>(0);
+  const [wtdAdjNote, setWtdAdjNote] = useState<string>("");
+  const [wtdAdjErr, setWtdAdjErr] = useState<string | null>(null);
+  const [wtdAdjSaving, setWtdAdjSaving] = useState(false);
+
+  // ✅ Admin cookie unlock
+  const [adminToken, setAdminToken] = useState<string>("");
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [adminBusy, setAdminBusy] = useState<boolean>(false);
+
+  // ✅ Withdraw Queue (admin readonly)
+  const [wdRows, setWdRows] = useState<WithdrawQueueRow[]>([]);
+  const [wdErr, setWdErr] = useState<string | null>(null);
+  const [wdLoading, setWdLoading] = useState(false);
+
+  // ✅ execute buttons status
+  const [execBusy, setExecBusy] = useState(false);
+  const [execMsg, setExecMsg] = useState<string | null>(null);
+
+  // load token from localStorage
   useEffect(() => {
     try {
       const t = localStorage.getItem("moneyflow.admin_token.v1");
@@ -176,6 +231,128 @@ export default function Page() {
       if (adminToken) localStorage.setItem("moneyflow.admin_token.v1", adminToken);
     } catch {}
   }, [adminToken]);
+
+  async function refreshIsAdmin() {
+    try {
+      const r = await fetch("/api/admin/me", { cache: "no-store", credentials: "include" });
+      const out = await safeReadJson(r);
+      setIsAdmin(Boolean(out.data?.is_admin));
+    } catch {
+      setIsAdmin(false);
+    }
+  }
+
+  useEffect(() => {
+    refreshIsAdmin();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function adminLogin() {
+    if (!adminToken) throw new Error("請先輸入 ADMIN TOKEN");
+
+    setAdminBusy(true);
+    try {
+      const r = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: adminToken }),
+        credentials: "include",
+        cache: "no-store",
+      });
+      const out = await safeReadJson(r);
+      if (!out.ok) throw new Error(out.data?.error || `Admin login failed (HTTP ${out.status})`);
+      await refreshIsAdmin();
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
+  async function adminLogout() {
+    setAdminBusy(true);
+    try {
+      await fetch("/api/admin/logout", { method: "POST", credentials: "include", cache: "no-store" });
+      await refreshIsAdmin();
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+
+  async function executeDeposits() {
+    try {
+      setExecMsg(null);
+      setPrincipalErr(null);
+      setWdErr(null);
+      setExecBusy(true);
+
+      if (!isAdmin) await adminLogin();
+      await refreshIsAdmin();
+      if (!isAdmin) throw new Error("未解鎖 Admin（cookie 未生效）");
+
+      const r = await fetch("/api/admin/execute-deposits", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const out = await safeReadJson(r);
+      if (!out.ok) {
+        const msg =
+          out.data?.error ||
+          `Execute deposits failed (HTTP ${out.status})` + (out.raw ? `\n${String(out.raw).slice(0, 260)}` : "");
+        throw new Error(msg);
+      }
+
+      const executed = Number(out.data?.executed ?? 0);
+      const sharePrice = out.data?.share_price_used;
+      setExecMsg(`✅ 入金結算完成：executed=${executed}（share_price_used=${sharePrice ?? "—"}）`);
+
+      await reloadPrincipal();
+    } catch (e: any) {
+      setExecMsg(null);
+      setPrincipalErr(e?.message || String(e));
+      await refreshIsAdmin();
+    } finally {
+      setExecBusy(false);
+    }
+  }
+
+  async function executeWithdrawals() {
+    try {
+      setExecMsg(null);
+      setWdErr(null);
+      setExecBusy(true);
+
+      if (!isAdmin) await adminLogin();
+      await refreshIsAdmin();
+      if (!isAdmin) throw new Error("未解鎖 Admin（cookie 未生效）");
+
+      const r = await fetch("/api/admin/execute-withdrawals", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const out = await safeReadJson(r);
+      if (!out.ok) {
+        const msg =
+          out.data?.error ||
+          `Execute withdrawals failed (HTTP ${out.status})` + (out.raw ? `\n${String(out.raw).slice(0, 260)}` : "");
+        throw new Error(msg);
+      }
+
+      const executed = Number(out.data?.executed ?? 0);
+      const sharePrice = out.data?.share_price_used;
+      setExecMsg(`✅ 提款結算完成：executed=${executed}（share_price_used=${sharePrice ?? "—"}）`);
+
+      await reloadWithdrawQueue();
+    } catch (e: any) {
+      setExecMsg(null);
+      setWdErr(e?.message || String(e));
+      await refreshIsAdmin();
+    } finally {
+      setExecBusy(false);
+    }
+  }
 
   // overview
   useEffect(() => {
@@ -230,53 +407,106 @@ export default function Page() {
     }
   }
 
-  useEffect(() => {
-    reloadPrincipal();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function addPrincipal() {
+  async function reloadWtdAdjustments() {
     try {
-      setPrincipalErr(null);
-
-      const month = String(pMonth || "").slice(0, 7);
-      const delta = Number(pDelta);
-
-      if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("月份格式要 YYYY-MM");
-      if (!Number.isFinite(delta) || delta === 0) throw new Error("金額不能是 0，正數=入金，負數=出金");
-      if (!adminToken) throw new Error("請先輸入 ADMIN TOKEN（只要輸入一次，會記住）");
-
-      setPrincipalSaving(true);
-
-      const r = await fetch("/api/admin/principal", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-admin-token": adminToken,
-        },
-        body: JSON.stringify({
-          month,
-          delta,
-          note: pNote?.trim() || null,
-        }),
-      });
-
+      setWtdAdjErr(null);
+      const r = await fetch("/api/public/wtd-adjustments", { cache: "no-store" });
       const out = await safeReadJson(r);
 
       if (!out.ok) {
         const msg =
           out.data?.error ||
-          `Failed to save principal adjustment (HTTP ${out.status})` + (out.raw ? `\n${String(out.raw).slice(0, 260)}` : "");
+          `Failed to fetch WTD adjustments (HTTP ${out.status})` +
+            (out.raw ? `\n${String(out.raw).slice(0, 220)}` : "");
         throw new Error(msg);
       }
 
-      setPDelta(0);
-      setPNote("");
-      await reloadPrincipal();
+      const rows = (out.data?.rows ?? out.data?.data?.rows ?? out.data?.data ?? []) as WtdAdjustmentRow[];
+      setWtdAdjRows(Array.isArray(rows) ? rows : []);
     } catch (e: any) {
-      setPrincipalErr(e?.message || String(e));
+      setWtdAdjErr(e?.message || String(e));
+    }
+  }
+
+  useEffect(() => {
+    reloadPrincipal();
+    reloadWtdAdjustments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function addWtdAdjustment() {
+    try {
+      setWtdAdjErr(null);
+
+      const delta = Number(wtdAdjDelta);
+      const note = wtdAdjNote?.trim() || null;
+      const weekStart = yyyymmdd(startOfWeekSunday(new Date())); // 本週週日起點
+
+      if (!Number.isFinite(delta) || delta === 0) throw new Error("調整金額不能是 0（可正可負）");
+
+      if (!isAdmin) await adminLogin();
+      await refreshIsAdmin();
+      if (!isAdmin) throw new Error("未解鎖 Admin（cookie 未生效）");
+
+      setWtdAdjSaving(true);
+
+      const r = await fetch("/api/admin/wtd-adjustments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        cache: "no-store",
+        body: JSON.stringify({ week_start: weekStart, delta_usd: delta, note }),
+      });
+
+      const out = await safeReadJson(r);
+      if (!out.ok) {
+        const msg =
+          out.data?.error ||
+          `Failed to save WTD adjustment (HTTP ${out.status})` + (out.raw ? `\n${String(out.raw).slice(0, 260)}` : "");
+        throw new Error(msg);
+      }
+
+      setWtdAdjDelta(0);
+      setWtdAdjNote("");
+      await reloadWtdAdjustments();
+    } catch (e: any) {
+      setWtdAdjErr(e?.message || String(e));
+      await refreshIsAdmin();
     } finally {
-      setPrincipalSaving(false);
+      setWtdAdjSaving(false);
+    }
+  }
+
+  async function reloadWithdrawQueue() {
+    try {
+      setWdErr(null);
+      setWdLoading(true);
+
+      if (!isAdmin) await adminLogin();
+      await refreshIsAdmin();
+      if (!isAdmin) throw new Error("未解鎖 Admin（cookie 未生效）");
+
+      const r = await fetch("/api/admin/withdraw-queue", {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const out = await safeReadJson(r);
+      if (!out.ok) {
+        const msg =
+          out.data?.error ||
+          `Failed to fetch withdraw queue (HTTP ${out.status})` + (out.raw ? `\n${String(out.raw).slice(0, 220)}` : "");
+        throw new Error(msg);
+      }
+
+      const rows = (out.data?.rows ?? []) as WithdrawQueueRow[];
+      setWdRows(Array.isArray(rows) ? rows : []);
+    } catch (e: any) {
+      setWdErr(e?.message || String(e));
+      await refreshIsAdmin();
+    } finally {
+      setWdLoading(false);
     }
   }
 
@@ -294,71 +524,81 @@ export default function Page() {
     return rows.filter((r) => new Date(r.timestamp).getTime() >= cutoff);
   }, [data, range]);
 
-  const pnlOnlyAllSeries = useMemo(() => {
+  /** ✅ WTD base（只看 NAV Δ；週日歸零） */
+  const wtdBaseAllSeries = useMemo(() => {
     const navAll = [...(data?.nav_history ?? [])].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
     if (!navAll.length) return [];
 
-    const pr = [...(principalRows ?? [])]
-      .map((r) => ({ created_at: r.created_at, delta: num(r.delta) }))
-      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-
-    let i = 0;
-    let principalCum = 0;
-    const anchorByMonth = new Map<string, number>();
+    const anchorByWeek = new Map<string, number>();
 
     return navAll.map((p) => {
-      const t = new Date(p.timestamp).getTime();
-      while (i < pr.length && new Date(pr[i].created_at).getTime() <= t) {
-        principalCum += pr[i].delta;
-        i++;
-      }
-
       const nav = num(p.total_nav);
-      const pnlBase = nav - principalCum;
+      const wk = weekKeyFromISO(p.timestamp);
 
-      const monthKey = monthKeyFromISO(p.timestamp);
-      if (!anchorByMonth.has(monthKey)) anchorByMonth.set(monthKey, pnlBase);
-      const anchor = anchorByMonth.get(monthKey) ?? pnlBase;
-
-      const pnlMonth = pnlBase - anchor;
+      if (!anchorByWeek.has(wk)) anchorByWeek.set(wk, nav);
+      const anchor = anchorByWeek.get(wk) ?? nav;
 
       return {
         timestamp: p.timestamp,
-        pnl_month: pnlMonth,
-        pnl_base: pnlBase,
-        principal_cum: principalCum,
+        wtd_base: nav - anchor,
         total_nav: nav,
-        month_key: monthKey,
+        week_key: wk,
       };
     });
-  }, [data, principalRows]);
+  }, [data]);
 
-  const pnlOnlyChartData = useMemo(() => {
-    if (!pnlOnlyAllSeries.length) return [];
-    if (range === "ALL") return pnlOnlyAllSeries;
+  /** ✅ WTD adjustment map（每週一個累加） */
+  const wtdAdjByWeek = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of wtdAdjRows ?? []) {
+      const wk = String(r.week_start || "").slice(0, 10);
+      const v = num(r.delta_usd);
+      m.set(wk, (m.get(wk) ?? 0) + v);
+    }
+    return m;
+  }, [wtdAdjRows]);
+
+  /** ✅ 最終 WTD = base + 你手動調整（同週整段加成） */
+  const wtdAllSeries = useMemo(() => {
+    return (wtdBaseAllSeries ?? []).map((r: any) => {
+      const adj = wtdAdjByWeek.get(r.week_key) ?? 0;
+      return {
+        ...r,
+        wtd: num(r.wtd_base) + adj,
+        wtd_adj: adj,
+      };
+    });
+  }, [wtdBaseAllSeries, wtdAdjByWeek]);
+
+  const wtdChartData = useMemo(() => {
+    if (!wtdAllSeries.length) return [];
+    if (range === "ALL") return wtdAllSeries;
     const days = range === "7D" ? 7 : 30;
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    return pnlOnlyAllSeries.filter((r) => new Date(r.timestamp).getTime() >= cutoff);
-  }, [pnlOnlyAllSeries, range]);
+    return wtdAllSeries.filter((r) => new Date(r.timestamp).getTime() >= cutoff);
+  }, [wtdAllSeries, range]);
 
-  const latestPnlOnly = pnlOnlyChartData[pnlOnlyChartData.length - 1];
-  const monthPnl = num(latestPnlOnly?.pnl_month ?? 0);
-  const monthPnlPositive = monthPnl >= 0;
+  const latestWtd = wtdChartData[wtdChartData.length - 1];
+  const weekPnl = num(latestWtd?.wtd ?? 0);
+  const weekPnlPositive = weekPnl >= 0;
 
-  const lastMonthPnl = useMemo(() => {
-    if (!pnlOnlyAllSeries.length) return null;
-    const pm = prevMonthKey(new Date());
-    const rows = pnlOnlyAllSeries.filter((r: any) => r.month_key === pm);
+  const thisWeekKey = useMemo(() => yyyymmdd(startOfWeekSunday(new Date())), []);
+  const thisWeekAdj = useMemo(() => wtdAdjByWeek.get(thisWeekKey) ?? 0, [wtdAdjByWeek, thisWeekKey]);
+
+  const lastWeekPnl = useMemo(() => {
+    if (!wtdAllSeries.length) return null;
+    const pw = prevWeekKey(new Date());
+    const rows = wtdAllSeries.filter((r: any) => r.week_key === pw);
     if (!rows.length) return null;
     const last = rows[rows.length - 1];
-    return { month: pm, value: num(last.pnl_month) };
-  }, [pnlOnlyAllSeries]);
+    return { week: pw, value: num(last.wtd) };
+  }, [wtdAllSeries]);
 
-  const lastMonthLine = lastMonthPnl
-    ? `上月損益（${lastMonthPnl.month}）：${lastMonthPnl.value >= 0 ? "+" : ""}${fmtUsd(lastMonthPnl.value)} 美元`
-    : "上月損益：—";
+  const lastWeekLine = lastWeekPnl
+    ? `上週損益（週起點 ${lastWeekPnl.week}）：${lastWeekPnl.value >= 0 ? "+" : ""}${fmtUsd(lastWeekPnl.value)} 美元`
+    : "上週損益：—";
 
   const categoryOptions = useMemo(() => {
     const set = new Set<string>();
@@ -480,12 +720,14 @@ export default function Page() {
           <Metric label="總淨值" value={`${fmtUsd(totalNav)} 美元`} sub="USD" />
         </Card>
 
-        <Card accent={monthPnlPositive ? "good" : "bad"}>
+        <Card accent={weekPnlPositive ? "good" : "bad"}>
           <Metric
-            label="本月損益"
-            value={`${monthPnlPositive ? "+" : ""}${fmtUsd(monthPnl)} 美元`}
-            sub={`MTD\n${lastMonthLine}`}
-            tone={monthPnlPositive ? "good" : "bad"}
+            label="本週損益"
+            value={`${weekPnlPositive ? "+" : ""}${fmtUsd(weekPnl)} 美元`}
+            sub={`WTD（週日歸零）\n${lastWeekLine}\n= NAV Δ + 手動調整（本週 ${thisWeekAdj >= 0 ? "+" : ""}${fmtUsd(
+              thisWeekAdj
+            )}）`}
+            tone={weekPnlPositive ? "good" : "bad"}
           />
         </Card>
 
@@ -634,21 +876,30 @@ export default function Page() {
 
       {/* Charts row 2 */}
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        {/* 左：WTD + 手動調整（不動） */}
         <Card
           className="lg:col-span-2"
           accent="good"
-          title="本月損益（PnL Only）"
-          subtitle="每月歸零；入金/出金請用右側 delta 抵消（入金填 +、出金填 -）"
+          title="本週損益（NAV Δ + 手動調整）"
+          subtitle="每週日歸零；不受投資人出入金影響；手動調整需 Admin 權限"
           right={
             <div className="text-right text-xs" style={{ color: THEME.muted }}>
-              最新本月損益：{" "}
-              <span style={{ color: THEME.text, fontWeight: 700 }}>${fmtUsd(latestPnlOnly?.pnl_month ?? 0)}</span>
+              最新本週損益：{" "}
+              <span style={{ color: THEME.text, fontWeight: 700 }}>${fmtUsd(latestWtd?.wtd ?? 0)}</span>
+              <div className="mt-1" style={{ color: THEME.muted }}>
+                本週手動調整：{" "}
+                <span style={{ color: THEME.text, fontWeight: 700 }}>
+                  {thisWeekAdj >= 0 ? "+" : ""}
+                  {fmtUsd(thisWeekAdj)}
+                </span>
+              </div>
             </div>
           }
         >
+          {/* 上：圖 */}
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={pnlOnlyChartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+              <LineChart data={wtdChartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="4 4" stroke="rgba(148,163,184,0.16)" />
                 <XAxis
                   dataKey="timestamp"
@@ -666,7 +917,7 @@ export default function Page() {
                   tickLine={false}
                 />
                 <Tooltip
-                  formatter={(v: any) => [`$${fmtUsd(v)}`, "本月損益"]}
+                  formatter={(v: any) => [`$${fmtUsd(v)}`, "本週損益"]}
                   labelFormatter={(l) => formatTime(l)}
                   contentStyle={{
                     borderRadius: 12,
@@ -677,8 +928,8 @@ export default function Page() {
                 />
                 <Line
                   type="monotone"
-                  dataKey="pnl_month"
-                  name="pnl_month"
+                  dataKey="wtd"
+                  name="wtd"
                   stroke={THEME.good}
                   strokeWidth={2.6}
                   dot={false}
@@ -687,13 +938,161 @@ export default function Page() {
               </LineChart>
             </ResponsiveContainer>
           </div>
+
+          {/* 下：手動調整 */}
+          <div
+            className="mt-4 rounded-2xl border p-4"
+            style={{ borderColor: "rgba(226,198,128,0.18)", background: "rgba(255,255,255,0.02)" }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold" style={{ color: THEME.text }}>
+                  本週損益手動調整（Admin）
+                </div>
+                <div className="mt-1 text-xs" style={{ color: THEME.muted }}>
+                  只影響 WTD 顯示：WTD = NAV Δ + 調整值；不影響 NAV、不影響投資人帳務。
+                </div>
+              </div>
+
+              <button
+                onClick={reloadWtdAdjustments}
+                className="shrink-0 rounded-xl border px-3 py-2 text-xs font-semibold"
+                style={{
+                  borderColor: "rgba(226,198,128,0.18)",
+                  background: "rgba(255,255,255,0.03)",
+                  color: THEME.text,
+                }}
+              >
+                重新載入
+              </button>
+            </div>
+
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <div className="col-span-1">
+                <div className="text-xs mb-1" style={{ color: THEME.muted }}>
+                  本週起點（週日）
+                </div>
+                <div
+                  className="w-full rounded-xl border px-3 py-2 text-sm"
+                  style={{
+                    borderColor: "rgba(226,198,128,0.18)",
+                    background: "rgba(0,0,0,0.18)",
+                    color: THEME.text,
+                  }}
+                >
+                  {thisWeekKey}
+                </div>
+              </div>
+
+              <div className="col-span-1">
+                <div className="text-xs mb-1" style={{ color: THEME.muted }}>
+                  調整金額（USD，+ / -）
+                </div>
+                <input
+                  value={wtdAdjDelta}
+                  onChange={(e) => setWtdAdjDelta(Number(e.target.value))}
+                  type="number"
+                  placeholder="+10 / -10"
+                  className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
+                  style={{
+                    borderColor: "rgba(226,198,128,0.18)",
+                    background: "rgba(255,255,255,0.03)",
+                    color: THEME.text,
+                  }}
+                />
+              </div>
+
+              <div className="col-span-1">
+                <div className="text-xs mb-1" style={{ color: THEME.muted }}>
+                  備註（可空）
+                </div>
+                <input
+                  value={wtdAdjNote}
+                  onChange={(e) => setWtdAdjNote(e.target.value)}
+                  placeholder="例如：手動對帳修正"
+                  className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
+                  style={{
+                    borderColor: "rgba(226,198,128,0.18)",
+                    background: "rgba(255,255,255,0.03)",
+                    color: THEME.text,
+                  }}
+                />
+              </div>
+            </div>
+
+            <button
+              disabled={wtdAdjSaving}
+              onClick={addWtdAdjustment}
+              className="mt-3 w-full rounded-xl px-3 py-2 text-sm font-semibold transition-opacity"
+              style={{
+                background: isAdmin ? THEME.gold2 : "rgba(148,163,184,0.25)",
+                color: isAdmin ? "#0B0E14" : THEME.muted,
+                opacity: wtdAdjSaving ? 0.7 : 1,
+              }}
+              title={isAdmin ? "寫入本週損益調整" : "請先解鎖 Admin（右側）"}
+            >
+              {wtdAdjSaving ? "儲存中…" : "新增一筆（本週損益調整）"}
+            </button>
+
+            <div className="mt-3 text-xs" style={{ color: THEME.muted }}>
+              本週累積調整：{" "}
+              <span style={{ color: THEME.text, fontWeight: 700 }}>
+                {thisWeekAdj >= 0 ? "+" : ""}
+                {fmtUsd(thisWeekAdj)}
+              </span>
+            </div>
+
+            {wtdAdjErr ? (
+              <div className="mt-2 text-xs whitespace-pre-line" style={{ color: THEME.bad }}>
+                {wtdAdjErr}
+              </div>
+            ) : null}
+
+            <div
+              className="mt-2 max-h-40 overflow-auto rounded-xl border p-3 text-xs"
+              style={{
+                borderColor: "rgba(255,255,255,0.10)",
+                background: "rgba(0,0,0,0.18)",
+                color: THEME.muted,
+              }}
+            >
+              {wtdAdjRows.length === 0 ? (
+                <div>尚無 WTD 調整紀錄</div>
+              ) : (
+                <div className="space-y-2">
+                  {wtdAdjRows
+                    .slice()
+                    .sort((a, b) => (a.created_at > b.created_at ? -1 : 1))
+                    .map((r) => (
+                      <div key={r.id} className="flex items-center justify-between">
+                        <div>
+                          <span className="font-semibold" style={{ color: THEME.text }}>
+                            {String(r.week_start).slice(0, 10)}
+                          </span>{" "}
+                          <span style={{ color: THEME.muted }}>{r.note || ""}</span>
+                        </div>
+                        <div style={{ color: THEME.gold2, fontWeight: 700 }}>
+                          {num(r.delta_usd) >= 0 ? "+" : ""}
+                          {fmtUsd(r.delta_usd)}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          </div>
         </Card>
 
-        <Card accent="gold" title="本金調整（雲端）" subtitle="用來抵消入金/出金；正數=入金，負數=出金">
+        {/* 右：本金調整（雲端） */}
+        <Card
+          accent="gold"
+          title="本金調整（雲端）"
+          subtitle="只讀：保留 Admin 解鎖/結算/載入；本金列表隱藏；內含提款申請總覽（下拉）"
+        >
           <div className="space-y-3">
             <div>
               <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                ADMIN TOKEN（只要輸入一次，會記住）
+                ADMIN TOKEN（只用來解鎖 cookie；不會再傳到其他 API）
               </div>
               <input
                 value={adminToken}
@@ -708,71 +1107,73 @@ export default function Page() {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                  月份（YYYY-MM）
-                </div>
-                <input
-                  value={pMonth}
-                  onChange={(e) => setPMonth(e.target.value)}
-                  placeholder="2026-02"
-                  className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
-                  style={{
-                    borderColor: "rgba(226,198,128,0.18)",
-                    background: "rgba(255,255,255,0.03)",
-                    color: THEME.text,
-                  }}
-                />
-              </div>
-              <div>
-                <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                  金額（+ / -）
-                </div>
-                <input
-                  value={pDelta}
-                  onChange={(e) => setPDelta(Number(e.target.value))}
-                  type="number"
-                  placeholder="+50 入金 / -50 出金"
-                  className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
-                  style={{
-                    borderColor: "rgba(226,198,128,0.18)",
-                    background: "rgba(255,255,255,0.03)",
-                    color: THEME.text,
-                  }}
-                />
-              </div>
-            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={adminLogin}
+                disabled={adminBusy}
+                className="flex-1 rounded-xl px-3 py-2 text-sm font-semibold"
+                style={{
+                  background: isAdmin ? "rgba(34,197,94,0.18)" : "rgba(212,175,55,0.95)",
+                  color: isAdmin ? THEME.text : "#0B0E14",
+                  opacity: adminBusy ? 0.7 : 1,
+                }}
+              >
+                {isAdmin ? "已解鎖（12hr）" : adminBusy ? "解鎖中…" : "解鎖 Admin（換 cookie）"}
+              </button>
 
-            <div>
-              <div className="text-xs mb-1" style={{ color: THEME.muted }}>
-                備註（可空）
-              </div>
-              <input
-                value={pNote}
-                onChange={(e) => setPNote(e.target.value)}
-                placeholder="例如：投資人入金 50（抵消）"
-                className="w-full rounded-xl border px-3 py-2 text-sm outline-none"
+              <button
+                onClick={adminLogout}
+                disabled={adminBusy}
+                className="rounded-xl border px-3 py-2 text-sm font-semibold"
                 style={{
                   borderColor: "rgba(226,198,128,0.18)",
                   background: "rgba(255,255,255,0.03)",
                   color: THEME.text,
+                  opacity: adminBusy ? 0.7 : 1,
                 }}
-              />
+              >
+                登出
+              </button>
             </div>
 
-            <button
-              disabled={principalSaving}
-              onClick={addPrincipal}
-              className="w-full rounded-xl px-3 py-2 text-sm font-semibold transition-opacity"
-              style={{
-                background: THEME.gold2,
-                color: "#0B0E14",
-                opacity: principalSaving ? 0.7 : 1,
-              }}
-            >
-              {principalSaving ? "儲存中…" : "新增一筆（雲端）"}
-            </button>
+            {/* Execute buttons */}
+            <div className="grid grid-cols-1 gap-2">
+              <button
+                onClick={executeDeposits}
+                disabled={execBusy}
+                className="w-full rounded-xl border px-3 py-2 text-sm font-semibold"
+                style={{
+                  borderColor: "rgba(226,198,128,0.18)",
+                  background: "rgba(255,255,255,0.03)",
+                  color: THEME.text,
+                  opacity: execBusy ? 0.7 : 1,
+                }}
+                title="把所有 PENDING 入金用當下 share_price 鑄造成 shares（同一批用同價格）"
+              >
+                {execBusy ? "結算中…" : "結算入金（Execute Deposits）"}
+              </button>
+
+              <button
+                onClick={executeWithdrawals}
+                disabled={execBusy}
+                className="w-full rounded-xl border px-3 py-2 text-sm font-semibold"
+                style={{
+                  borderColor: "rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.02)",
+                  color: THEME.muted,
+                  opacity: execBusy ? 0.7 : 1,
+                }}
+                title="把所有 PENDING 提款用當下 share_price 換算 burn shares，更新為 UNPAID"
+              >
+                {execBusy ? "結算中…" : "結算提款（Execute Withdrawals）"}
+              </button>
+
+              {execMsg ? (
+                <div className="text-xs whitespace-pre-line" style={{ color: THEME.good }}>
+                  {execMsg}
+                </div>
+              ) : null}
+            </div>
 
             <button
               onClick={reloadPrincipal}
@@ -792,37 +1193,172 @@ export default function Page() {
               </div>
             ) : null}
 
-            <div
-              className="mt-2 max-h-48 overflow-auto rounded-xl border p-3 text-xs"
-              style={{
-                borderColor: "rgba(255,255,255,0.10)",
-                background: "rgba(0,0,0,0.18)",
-                color: THEME.muted,
-              }}
-            >
-              {principalRows.length === 0 ? (
-                <div>尚無紀錄</div>
-              ) : (
-                <div className="space-y-2">
-                  {principalRows
-                    .slice()
-                    .sort((a, b) => (a.created_at > b.created_at ? -1 : 1))
-                    .map((r) => (
-                      <div key={r.id} className="flex items-center justify-between">
-                        <div>
-                          <span className="font-semibold" style={{ color: THEME.text }}>
-                            {r.month}
-                          </span>{" "}
-                          <span style={{ color: THEME.muted }}>{r.note || ""}</span>
+            {/* ✅ 本金列表仍維持隱藏 */}
+            {!HIDE_PRINCIPAL_LIST ? (
+              <div
+                className="mt-2 max-h-48 overflow-auto rounded-xl border p-3 text-xs"
+                style={{
+                  borderColor: "rgba(255,255,255,0.10)",
+                  background: "rgba(0,0,0,0.18)",
+                  color: THEME.muted,
+                }}
+              >
+                {principalRows.length === 0 ? (
+                  <div>尚無紀錄</div>
+                ) : (
+                  <div className="space-y-2">
+                    {principalRows
+                      .slice()
+                      .sort((a, b) => (a.created_at > b.created_at ? -1 : 1))
+                      .map((r) => (
+                        <div key={r.id} className="flex items-center justify-between">
+                          <div>
+                            <span className="font-semibold" style={{ color: THEME.text }}>
+                              {r.month}
+                            </span>{" "}
+                            <span style={{ color: THEME.muted }}>{r.note || ""}</span>
+                          </div>
+                          <div style={{ color: THEME.gold2, fontWeight: 700 }}>
+                            {num(r.delta) >= 0 ? "+" : ""}
+                            {fmtUsd(r.delta)}
+                          </div>
                         </div>
-                        <div style={{ color: THEME.gold2, fontWeight: 700 }}>
-                          {num(r.delta) >= 0 ? "+" : ""}
-                          {fmtUsd(r.delta)}
-                        </div>
-                      </div>
-                    ))}
+                      ))}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {/* ✅ 提款申請總覽（下拉式 + 內部滾動） */}
+            <div className="mt-4 rounded-2xl border p-3" style={{ borderColor: "rgba(255,255,255,0.10)" }}>
+              {/* ✅ 這裡修掉：外層不要用 button，改成 div role=button（避免 button 包 button） */}
+              <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={wdOpen}
+                onClick={() => setWdOpen((v) => !v)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setWdOpen((v) => !v);
+                  }
+                }}
+                className="w-full cursor-pointer select-none"
+                style={{ color: THEME.text }}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold" style={{ color: THEME.text }}>
+                      提款申請總覽
+                      <span className="ml-2 text-xs" style={{ color: THEME.muted }}>
+                        {wdOpen ? "（收起）" : "（展開）"}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-xs" style={{ color: THEME.muted }}>
+                      提款狀態
+                    </div>
+                  </div>
+
+                  <div className="shrink-0 flex items-center gap-2">
+                    <span
+                      className="rounded-full border px-2 py-0.5 text-xs"
+                      style={{
+                        borderColor: "rgba(255,255,255,0.14)",
+                        background: "rgba(255,255,255,0.04)",
+                        color: THEME.muted,
+                      }}
+                    >
+                      {wdRows.length} 筆
+                    </span>
+
+                    {/* ✅ 內層這顆仍是 button，合法（因為外層已經不是 button） */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation(); // ✅ 避免觸發外層展開/收起
+                        reloadWithdrawQueue();
+                        setWdOpen(true);
+                      }}
+                      disabled={wdLoading}
+                      className="rounded-xl border px-3 py-2 text-xs font-semibold"
+                      style={{
+                        borderColor: "rgba(226,198,128,0.18)",
+                        background: "rgba(255,255,255,0.03)",
+                        color: THEME.text,
+                        opacity: wdLoading ? 0.7 : 1,
+                      }}
+                    >
+                      {wdLoading ? "載入中…" : "重新載入"}
+                    </button>
+                  </div>
                 </div>
-              )}
+              </div>
+
+              {/* body */}
+              {wdOpen ? (
+                <div className="mt-3">
+                  {wdErr ? (
+                    <div className="mb-2 text-xs whitespace-pre-line" style={{ color: THEME.bad }}>
+                      {wdErr}
+                    </div>
+                  ) : null}
+
+                  <div className="overflow-x-auto rounded-xl border" style={{ borderColor: "rgba(255,255,255,0.10)" }}>
+                    <div className="max-h-64 overflow-auto">
+                      <table className="w-full border-collapse text-sm">
+                        <thead>
+                          <tr
+                            className="border-b text-left"
+                            style={{ borderColor: "rgba(255,255,255,0.10)", color: THEME.muted }}
+                          >
+                            <th className="py-3 px-4">時間</th>
+                            <th className="py-3 px-4">狀態</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {wdRows.length === 0 ? (
+                            <tr>
+                              <td className="py-4 px-4" colSpan={2} style={{ color: THEME.muted }}>
+                                尚無資料（請先按「重新載入」）
+                              </td>
+                            </tr>
+                          ) : (
+                            wdRows.map((r) => {
+                              const st = (r.status ?? "").toUpperCase();
+                              const stTone =
+                                st === "PENDING"
+                                  ? THEME.gold2
+                                  : st === "CANCELLED"
+                                  ? "rgba(148,163,184,0.9)"
+                                  : THEME.text;
+
+                              return (
+                                <tr key={r.id} className="border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+                                  <td className="py-3 px-4" style={{ color: THEME.muted }}>
+                                    {new Date(r.created_at).toLocaleString()}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <span
+                                      className="rounded-full border px-2 py-0.5 text-xs"
+                                      style={{
+                                        borderColor: "rgba(255,255,255,0.14)",
+                                        background: "rgba(255,255,255,0.05)",
+                                        color: stTone,
+                                      }}
+                                    >
+                                      {st || "—"}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
         </Card>
